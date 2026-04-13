@@ -1,0 +1,17 @@
+agno
+fastapi
+uvicorn
+psycopg2-binary
+redis
+google-generativeai
+google-genai
+openai
+langfuse>=4.3.1
+python-dotenv
+requests
+python-multipart
+mistralai<2.0.0
+scikit-image
+imagehash
+numpy
+Pillow

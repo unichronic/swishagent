@@ -1,0 +1,56 @@
+# env
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# go binaries
+swishagent
+main
+*.exe
+
+# node
+web/node_modules/
+web/dist/
+
+# editor / tooling
+.vscode/
+.kiro/
+*.swp
+*.swo
+
+# docs (not for commit)
+docs/
+convo
+
+# debug / audit / temp files
+*.md
+!README.md
+
+# parallel go port (wip, not ready)
+parallel-go/
+
+# extra go services (not committing)
+order_service.go
+
+# db / sqlite
+*.db
+*.sqlite
+
+# logs
+*.log
+/tmp/
+
+# docker
+.dockerignore
