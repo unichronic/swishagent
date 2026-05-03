@@ -1,6 +1,8 @@
 import os
 import json
+import base64
 from pathlib import Path
+from urllib.parse import unquote_to_bytes
 
 import requests
 from dotenv import load_dotenv
@@ -97,16 +99,28 @@ def get_trust_score(user_id: str) -> dict:
         return _fallback_trust(user_id)
 
 
+def _load_photo_bytes(image_url: str) -> tuple[bytes, str]:
+    if image_url.startswith("data:"):
+        header, payload = image_url.split(",", 1)
+        mime_type = header[5:].split(";", 1)[0] or "image/jpeg"
+        if ";base64" in header:
+            return base64.b64decode(payload), mime_type
+        return unquote_to_bytes(payload), mime_type
+
+    img_response = requests.get(image_url, timeout=5)
+    img_response.raise_for_status()
+    mime_type = img_response.headers.get("content-type", "image/jpeg").split(";")[0]
+    return img_response.content, mime_type
+
+
 def analyze_photo(image_url: str) -> dict:
     try:
         from google.genai import types as genai_types
 
-        img_response = requests.get(image_url, timeout=5)
-        img_response.raise_for_status()
-        mime_type = img_response.headers.get("content-type", "image/jpeg").split(";")[0]
+        image_bytes, mime_type = _load_photo_bytes(image_url)
         response = call_gemini_multimodal(
             [
-                genai_types.Part.from_bytes(data=img_response.content, mime_type=mime_type),
+                genai_types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
                 (
                     'You are a food-delivery fraud detector. Respond in JSON only: '
                     '{"valid": true/false, "reason": "brief explanation", '

@@ -155,6 +155,8 @@ function App() {
   const previewVideoRef = useRef(null)
   const recorderRef = useRef(null)
   const recordingIntervalRef = useRef(null)
+  const captureFrameIntervalRef = useRef(null)
+  const activeStreamRef = useRef(null)
   const conversationIdRef = useRef('')
   const intakeContextPendingRef = useRef(false)
   const lastComplaintRef = useRef('')
@@ -167,7 +169,20 @@ function App() {
 
   useEffect(() => {
     if (previewVideoRef.current && previewStream) {
-      previewVideoRef.current.srcObject = previewStream
+      const video = previewVideoRef.current
+      video.srcObject = previewStream
+      video.setAttribute('playsinline', 'true')
+      video.muted = true
+      const playPreview = () => video.play().catch(() => {})
+      if (video.readyState >= 1) {
+        playPreview()
+      } else {
+        video.addEventListener('loadedmetadata', playPreview, { once: true })
+      }
+      return () => {
+        video.removeEventListener('loadedmetadata', playPreview)
+        if (video.srcObject === previewStream) video.srcObject = null
+      }
     }
   }, [previewStream])
 
@@ -177,6 +192,11 @@ function App() {
 
   const resetSupportState = () => {
     if (recordedCapture?.videoUrl) URL.revokeObjectURL(recordedCapture.videoUrl)
+    if (recordedCapture?.previewUrl) URL.revokeObjectURL(recordedCapture.previewUrl)
+    if (activeStreamRef.current) {
+      activeStreamRef.current.getTracks().forEach((track) => track.stop())
+      activeStreamRef.current = null
+    }
     setAwaitingPhoto(false)
     setShowCaptureOverlay(false)
     setRecording(false)
@@ -271,8 +291,10 @@ function App() {
     }
   }
 
-  // Extract a single frame from a video element at its current time — PNG (lossless) for ELA accuracy
   const extractFrame = (video) => {
+    if (!video || !video.videoWidth || !video.videoHeight) {
+      return Promise.resolve(null)
+    }
     const canvas = document.createElement('canvas')
     canvas.width = 480
     canvas.height = Math.round(video.videoHeight * (480 / video.videoWidth))
@@ -280,91 +302,121 @@ function App() {
     return new Promise(resolve => canvas.toBlob(resolve, 'image/png'))
   }
 
-  // Extract 5 frames from a video blob at t=0, t=1.25, t=2.5, t=3.75, t=5
-  // 5 frames gives SSIM more temporal resolution to detect static/loop captures
-  const extractFrames = (videoBlob) => {
-    return new Promise((resolve, reject) => {
-      const url = URL.createObjectURL(videoBlob)
-      const video = document.createElement('video')
-      video.muted = true
-      video.preload = 'auto'
-      const frames = []
-      const timestamps = [0.01, 1.25, 2.5, 3.75, 5]
+  const fileToDataUrl = (file) => new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result)
+    reader.onerror = () => reject(reader.error)
+    reader.readAsDataURL(file)
+  })
 
-      const captureAt = (ts) => new Promise((res) => {
-        const onSeeked = async () => {
-          video.removeEventListener('seeked', onSeeked)
-          res(await extractFrame(video))
-        }
-        video.addEventListener('seeked', onSeeked)
-        video.currentTime = Math.min(ts, video.duration - 0.05)
+  const getCameraStream = async () => {
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: false
       })
+    } catch {
+      return navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+    }
+  }
 
-      video.addEventListener('loadedmetadata', async () => {
-        try {
-          for (const ts of timestamps) {
-            frames.push(await captureAt(ts))
-          }
-          URL.revokeObjectURL(url)
-          resolve(frames)
-        } catch (e) {
-          URL.revokeObjectURL(url)
-          reject(e)
-        }
-      })
-      video.addEventListener('error', () => { URL.revokeObjectURL(url); reject(new Error('video load failed')) })
-      video.src = url
-    })
+  const getRecorderOptions = () => {
+    if (typeof MediaRecorder === 'undefined') return null
+    const types = [
+      'video/mp4;codecs=h264',
+      'video/mp4',
+      'video/webm;codecs=vp9',
+      'video/webm;codecs=vp8',
+      'video/webm'
+    ]
+    const mimeType = types.find((type) => MediaRecorder.isTypeSupported(type))
+    return mimeType ? { mimeType } : {}
   }
 
   const handleStartRecording = async () => {
-    // Capture stable refs at call time to avoid stale closure in onstop
     const currentOrder = selectedOrder
     const currentComplaint = lastComplaintRef.current
 
     try {
+      if (recordingIntervalRef.current) clearInterval(recordingIntervalRef.current)
+      if (captureFrameIntervalRef.current) clearInterval(captureFrameIntervalRef.current)
+      if (activeStreamRef.current) {
+        activeStreamRef.current.getTracks().forEach((track) => track.stop())
+        activeStreamRef.current = null
+      }
       if (recordedCapture?.videoUrl) URL.revokeObjectURL(recordedCapture.videoUrl)
+      if (recordedCapture?.previewUrl) URL.revokeObjectURL(recordedCapture.previewUrl)
       setRecordedCapture(null)
       setVerifyingCapture(false)
       setCaptureError('')
       setRecordingProgress(0)
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+      const stream = await getCameraStream()
+      activeStreamRef.current = stream
       setPreviewStream(stream)
       setShowCaptureOverlay(true)
-      const recorder = new MediaRecorder(stream)
+      const recorderOptions = getRecorderOptions()
+      const recorder = recorderOptions === null ? null : new MediaRecorder(stream, recorderOptions)
       recorderRef.current = recorder
       const chunks = []
+      const frames = []
+      let finished = false
 
-      recorder.ondataavailable = e => chunks.push(e.data)
-      recorder.onstop = async () => {
+      const captureCurrentFrame = async () => {
+        const frame = await extractFrame(previewVideoRef.current)
+        if (frame) frames.push(frame)
+      }
+
+      const finishCapture = async () => {
+        if (finished) return
+        finished = true
+        if (recordingIntervalRef.current) {
+          clearInterval(recordingIntervalRef.current)
+          recordingIntervalRef.current = null
+        }
+        if (captureFrameIntervalRef.current) {
+          clearInterval(captureFrameIntervalRef.current)
+          captureFrameIntervalRef.current = null
+        }
+        await captureCurrentFrame()
         stream.getTracks().forEach(t => t.stop())
+        activeStreamRef.current = null
         setPreviewStream(null)
         setRecording(false)
         setRecordingProgress(0)
         recorderRef.current = null
 
-        const mimeType = recorder.mimeType || 'video/webm'
-        const videoBlob = new Blob(chunks, { type: mimeType })
-        const videoUrl = URL.createObjectURL(videoBlob)
-        try {
-          const frames = await extractFrames(videoBlob)
-          setRecordedCapture({ videoUrl, frames, order: currentOrder, complaint: currentComplaint })
-        } catch {
-          URL.revokeObjectURL(videoUrl)
-          setAwaitingPhoto(false)
+        if (frames.length < 3) {
           setShowCaptureOverlay(false)
           setMessages(prev => [...prev, {
             type: 'bot',
-            text: 'Something went wrong with the capture. Please try again.',
+            text: 'Camera opened, but we could not capture enough frames. Please try live capture again with the order clearly in frame.',
             timestamp: new Date()
           }])
+          setRecordedCapture(null)
+          return
         }
+
+        const videoBlob = chunks.length ? new Blob(chunks, { type: recorder?.mimeType || chunks[0]?.type || 'video/mp4' }) : null
+        const videoUrl = videoBlob ? URL.createObjectURL(videoBlob) : null
+        const previewUrl = URL.createObjectURL(frames[frames.length - 1])
+        setRecordedCapture({ videoUrl, previewUrl, frames, order: currentOrder, complaint: currentComplaint })
       }
 
-      recorder.start()
+      if (recorder) {
+        recorder.ondataavailable = e => {
+          if (e.data?.size) chunks.push(e.data)
+        }
+        recorder.onstop = finishCapture
+        recorder.start()
+      }
       setRecording(true)
+      setTimeout(captureCurrentFrame, 500)
+      captureFrameIntervalRef.current = setInterval(captureCurrentFrame, 1000)
 
-      // Count up progress over 5 seconds
       let elapsed = 0
       const interval = setInterval(() => {
         elapsed += 100
@@ -372,12 +424,24 @@ function App() {
         if (elapsed >= 5000) {
           clearInterval(interval)
           recordingIntervalRef.current = null
-          recorder.stop()
+          if (recorder && recorder.state === 'recording') {
+            recorder.stop()
+          } else {
+            finishCapture()
+          }
         }
       }, 100)
       recordingIntervalRef.current = interval
 
     } catch {
+      if (activeStreamRef.current) {
+        activeStreamRef.current.getTracks().forEach((track) => track.stop())
+        activeStreamRef.current = null
+      }
+      setPreviewStream(null)
+      setShowCaptureOverlay(false)
+      setRecording(false)
+      setRecordingProgress(0)
       setMessages(prev => [...prev, {
         type: 'bot',
         text: "Couldn't access camera. Please allow camera access and try again.",
@@ -391,15 +455,22 @@ function App() {
       clearInterval(recordingIntervalRef.current)
       recordingIntervalRef.current = null
     }
+    if (captureFrameIntervalRef.current) {
+      clearInterval(captureFrameIntervalRef.current)
+      captureFrameIntervalRef.current = null
+    }
     if (recorderRef.current && recorderRef.current.state === 'recording') {
       recorderRef.current.onstop = null
       recorderRef.current.stop()
       recorderRef.current = null
     }
-    if (previewStream) {
-      previewStream.getTracks().forEach((track) => track.stop())
+    const stream = activeStreamRef.current || previewStream
+    if (stream) {
+      stream.getTracks().forEach((track) => track.stop())
+      activeStreamRef.current = null
     }
     if (recordedCapture?.videoUrl) URL.revokeObjectURL(recordedCapture.videoUrl)
+    if (recordedCapture?.previewUrl) URL.revokeObjectURL(recordedCapture.previewUrl)
     setPreviewStream(null)
     setShowCaptureOverlay(false)
     setRecording(false)
@@ -423,8 +494,10 @@ function App() {
       const result = await axios.post(`${API_BASE}/verify-capture`, formData)
 
       if (result.data.valid) {
-        const captureFile = new File([recordedCapture.frames[0]], 'capture.png', { type: 'image/png' })
-        URL.revokeObjectURL(recordedCapture.videoUrl)
+        const captureFrame = recordedCapture.frames[recordedCapture.frames.length - 1]
+        const captureFile = new File([captureFrame], 'capture.png', { type: 'image/png' })
+        if (recordedCapture.videoUrl) URL.revokeObjectURL(recordedCapture.videoUrl)
+        if (recordedCapture.previewUrl) URL.revokeObjectURL(recordedCapture.previewUrl)
         setRecordedCapture(null)
         setShowCaptureOverlay(false)
         setAwaitingPhoto(false)
@@ -440,7 +513,7 @@ function App() {
   }
 
   const uploadPhoto = async (file) => {
-    return `https://placeholder.com/${file.name}`
+    return fileToDataUrl(file)
   }
 
   // Used by live capture — takes explicit order/complaint to avoid stale closure
@@ -780,10 +853,14 @@ function App() {
         </div>
       </div>
 
-      {showCaptureOverlay && (
+          {showCaptureOverlay && (
         <div className="capture-overlay">
           {recordedCapture ? (
-            <video src={recordedCapture.videoUrl} controls playsInline className="capture-overlay-video" />
+            recordedCapture.videoUrl ? (
+              <video src={recordedCapture.videoUrl} controls playsInline className="capture-overlay-video" />
+            ) : (
+              <img src={recordedCapture.previewUrl} alt="Capture preview" className="capture-overlay-video" />
+            )
           ) : (
             <video ref={previewVideoRef} autoPlay muted playsInline className="capture-overlay-video" />
           )}
@@ -809,7 +886,7 @@ function App() {
                     Retake
                   </button>
                   <button className="capture-review-btn" onClick={handleUseRecordedCapture} disabled={verifyingCapture}>
-                    {verifyingCapture ? 'Checking…' : 'Use video'}
+                    {verifyingCapture ? 'Checking…' : 'Use capture'}
                   </button>
                 </div>
               </div>
