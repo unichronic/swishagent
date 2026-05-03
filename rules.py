@@ -175,6 +175,8 @@ class Rules:
             issue_type = state.get("issue_type", issue_type)
         if photo_url and state.get("issue_type"):
             issue_type = state.get("issue_type", issue_type)
+        if issue_type == "foreign_object" and Rules._looks_like_ingredient_mismatch(user_text):
+            issue_type = "quality"
         info_query = Rules._choose_info_query(
             assessed_info_query=assessed_info_query,
             assessed_info_query_confidence=assessed_info_query_confidence,
@@ -197,7 +199,12 @@ class Rules:
         fault = Rules._choose_fault(inferred_fault, assessed_fault_hint, assessed_issue_confidence)
         issue_severity = Rules._choose_issue_severity(issue_type, assessed_issue_severity, assessed_issue_confidence, kitchen, fleet)
         explicit_comp = wants in {"refund", "replacement", "coupon", "credit"}
-        photo_present = bool(photo_url or photo_in_session)
+        current_turn_has_photo = bool(photo_url)
+        current_case_photo_key = Rules._photo_case_key(issue_type, item.get("name"))
+        if current_turn_has_photo and photo_valid is not False:
+            state["photo_evidence_case"] = current_case_photo_key
+        verified_photo_for_case = state.get("photo_evidence_case") == current_case_photo_key
+        photo_present = bool(current_turn_has_photo or verified_photo_for_case)
         needs_visual = Rules._visual_evidence_useful(
             issue_type=issue_type,
             order_items=order_items,
@@ -292,7 +299,7 @@ class Rules:
         state["negotiation_allowed"] = negotiation_allowed
         state["negotiation_strength"] = negotiation_strength
 
-        if state.get("pending") == "photo" and photo_present and photo_valid is not False:
+        if state.get("pending") == "photo" and current_turn_has_photo and photo_valid is not False:
             state["pending"] = None
 
         if is_abusive:
@@ -311,6 +318,16 @@ class Rules:
                 "amount": 0.0,
                 "message": "This needs a manual review. If you'd like to take it further, please email hello@justswish.in and the team can look into it from there.",
                 "reason": "Photo failed verification",
+            }
+            Rules._store_terminal_state(state)
+            return Rules._enforce_content(response)
+
+        if state.get("last_action") == "escalate" and info_query == "none":
+            response = {
+                "action": "escalate",
+                "amount": 0.0,
+                "message": Rules._review_escalation_message("case"),
+                "reason": "Case already marked for manual review",
             }
             Rules._store_terminal_state(state)
             return Rules._enforce_content(response)
@@ -372,6 +389,7 @@ class Rules:
                 assurance_query=assurance_query,
                 issue_type=issue_type,
                 fault=fault,
+                turn_act=turn_act,
                 kitchen=kitchen,
                 fleet=fleet,
                 trust=trust,
@@ -387,6 +405,7 @@ class Rules:
                 recommended_next_step=assessed_recommended_next_step,
             )
 
+        Rules._mark_terminal_action(state, response, item_name)
         response = Rules._enforce_content(response)
         response["_debug"] = {
             "issue_type": issue_type,
@@ -424,6 +443,7 @@ class Rules:
         assurance_query: bool,
         issue_type: str,
         fault: str,
+        turn_act: str,
         kitchen: Dict[str, Any],
         fleet: Dict[str, Any],
         trust: Dict[str, Any],
@@ -438,6 +458,7 @@ class Rules:
         clarification_needed: bool,
         recommended_next_step: Optional[str],
     ) -> Dict[str, Any]:
+        issue_severity = state.get("issue_severity", "medium")
         if clarification_needed and wants == "none" and info_query == "none" and not assurance_query:
             state["pending"] = None
             return {
@@ -454,6 +475,49 @@ class Rules:
                 "amount": 0.0,
                 "message": Rules._assurance_message(state, issue_type, fault),
                 "reason": "User asked for reassurance after replacement approval",
+            }
+
+        if state.get("last_action") == "escalate" and info_query == "none":
+            state["pending"] = None
+            return {
+                "action": "escalate",
+                "amount": 0.0,
+                "message": Rules._review_escalation_message("case"),
+                "reason": "Case already marked for manual review",
+            }
+
+        if state.get("last_action") == "replacement" and info_query == "none" and wants == "replacement":
+            state["pending"] = None
+            return {
+                "action": "info",
+                "amount": 0.0,
+                "message": Rules._info_query_message("status", order_details, order_items, fleet, state, last_bot_msg),
+                "reason": "Replacement already approved",
+            }
+
+        if (
+            recommended_next_step == "escalate"
+            and issue_type == "foreign_object"
+            and issue_severity == "high"
+            and wants == "none"
+            and bot_count > 0
+        ):
+            state["pending"] = None
+            state["desired_resolution"] = None
+            return {
+                "action": "escalate",
+                "amount": 0.0,
+                "message": Rules._review_escalation_message("case"),
+                "reason": "High-severity safety complaint requires manual review",
+            }
+
+        if info_query != "none" and issue_type != "info_query" and turn_act == "ask_cause":
+            state["pending"] = None
+            return {
+                "action": "info",
+                "amount": 0.0,
+                "message": Rules._info_message(item_name, issue_type, fault, kitchen, fleet, trust, last_bot_msg),
+                "reason": "User asked for the cause of an identified issue",
             }
 
         if wants == "refund" and state.get("last_action") == "replacement":
@@ -506,6 +570,20 @@ class Rules:
                     "amount": 0.0,
                     "message": Rules._review_escalation_message(wants),
                     "reason": "LLM recommendation and policy both point to manual review",
+                }
+            if (
+                wants == "replacement"
+                and issue_type == "spill_leak"
+                and state.get("evidence_strength") == "strong"
+                and state.get("economic_preference") == "replacement"
+            ):
+                state["pending"] = "replacement_confirm"
+                state["desired_resolution"] = "replacement"
+                return {
+                    "action": "info",
+                    "amount": 0.0,
+                    "message": Rules._replacement_confirm_message(item_name),
+                    "reason": "Strong evidence supports moving directly to replacement confirmation",
                 }
             state["pending"] = "coupon"
             state["desired_resolution"] = wants
@@ -914,6 +992,10 @@ class Rules:
         if explicit_comp and visual_evidence_useful:
             return True
         return False
+
+    @staticmethod
+    def _photo_case_key(issue_type: str, item_name: Optional[str]) -> str:
+        return f"{issue_type}:{_lower(item_name)}"
 
     @staticmethod
     def _refund_hard_block(order_value: float, trust_score: float) -> bool:
@@ -1338,7 +1420,7 @@ class Rules:
         assessed_info_query: Optional[str] = None,
     ) -> str:
         if assessment_provided:
-            if assessed_info_query and assessed_info_query != "none":
+            if assessed_info_query and assessed_info_query != "none" and assessed_issue_type in {None, "other", "info_query"}:
                 return "info_query"
             if not assessed_issue_type:
                 return "other"
@@ -1517,6 +1599,8 @@ class Rules:
             return "info_query"
         if Rules._looks_like_dietary_violation(text):
             return "foreign_object"
+        if Rules._looks_like_ingredient_mismatch(text):
+            return "quality"
         if any(word in text for word in ["wrong item", "different item", "got something else", "not what i ordered"]):
             return "wrong_item"
         if any(word in text for word in ["missing", "didn't get", "did not get", "not delivered", "left out"]):
@@ -1641,6 +1725,32 @@ class Rules:
         if any(term in text for term in veg_context_terms):
             return True
         return bool(re.search(r"\b(piece|bits?|chunks?)\s+of\s+(chick(?:en)?|egg|meat|fish|mutton|beef|prawn|pork)\b", text))
+
+    @staticmethod
+    def _looks_like_ingredient_mismatch(text: str) -> bool:
+        if not text:
+            return False
+        benign_food_terms = [
+            "vegetable",
+            "veggies",
+            "onion",
+            "capsicum",
+            "pepper",
+            "corn",
+            "sauce",
+            "masala",
+            "spice",
+            "herb",
+        ]
+        mismatch_phrases = [
+            r"\bpiece of (?:a |an )?(vegetable|veggies|onion|capsicum|pepper|corn)\b",
+            r"\b(extra|unexpected|wrong)\s+(vegetable|veggies|onion|capsicum|pepper|corn|sauce)\b",
+        ]
+        if any(re.search(pattern, text) for pattern in mismatch_phrases):
+            return True
+        if "shouldn't be in" in text and any(term in text for term in benign_food_terms):
+            return True
+        return False
 
     @staticmethod
     def _detect_info_query(complaint: str) -> str:
@@ -2116,6 +2226,18 @@ class Rules:
         state["pending"] = None
         state["desired_resolution"] = None
         state["coupon_push_count"] = 0
+
+    @staticmethod
+    def _mark_terminal_action(state: Dict[str, Any], response: Dict[str, Any], item_name: str) -> None:
+        action = response.get("action")
+        if action not in {"refund", "replacement", "escalate"}:
+            return
+        Rules._store_terminal_state(state)
+        state["last_action"] = action
+        if action == "replacement":
+            state["last_item_name"] = item_name
+        if action == "refund":
+            state["last_amount"] = response.get("amount", 0.0)
 
     @staticmethod
     def _contains_false_promise(text: str) -> bool:

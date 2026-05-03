@@ -253,6 +253,479 @@ def test_invalid_live_capture_escalates_without_compensation():
     assert "review" in result["message"].lower()
 
 
+def test_photo_evidence_is_scoped_to_the_current_item_case():
+    session_id = "test:photo-scoped-to-case"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    order_items = {
+        "items": [
+            {"name": "Roohafza Sharbat", "price": 99},
+            {"name": "Dark Chocolate Oreo Shake", "price": 189},
+        ]
+    }
+
+    turns = [
+        (
+            "roohafza sharbat was spilled",
+            {
+                "issue_type": "spill_leak",
+                "issue_confidence": 0.95,
+                "active_item_name": "Roohafza Sharbat",
+            },
+            None,
+            None,
+        ),
+        (
+            "photo attached",
+            {
+                "issue_type": "spill_leak",
+                "issue_confidence": 0.95,
+                "active_item_name": "Roohafza Sharbat",
+                "requested_resolution": "replacement",
+                "requested_resolution_confidence": 0.95,
+            },
+            "https://example.com/sharbat.jpg",
+            True,
+        ),
+        (
+            "dark chocolate oreo shake also spilled, replace that one",
+            {
+                "issue_type": "spill_leak",
+                "issue_confidence": 0.95,
+                "active_item_name": "Dark Chocolate Oreo Shake",
+                "requested_resolution": "replacement",
+                "requested_resolution_confidence": 0.95,
+            },
+            None,
+            None,
+        ),
+    ]
+
+    outputs = []
+    for complaint, assessment, photo_url, photo_valid in turns:
+        if photo_url:
+            mark_photo_provided(session_id)
+        history.append({"role": "user", "content": complaint})
+        result = Rules.resolve(
+            complaint=complaint,
+            conversation_history=history,
+            order_value=756,
+            trust_score=85,
+            kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+            fleet={"delay_mins": 15, "traffic_flag": True},
+            trust={"score": 85, "total_orders": 16},
+            order_details={"total_amount": 756},
+            order_items=order_items,
+            session_id=session_id,
+            assessment=assessment,
+            photo_url=photo_url,
+            photo_valid=photo_valid,
+            photo_in_session=session_has_photo(session_id),
+        )
+        history.append({"role": "bot", "content": result["message"]})
+        outputs.append(result)
+
+    assert outputs[1]["action"] == "info"
+    assert outputs[2]["action"] == "live_capture"
+    assert "photo" in outputs[2]["message"].lower()
+
+
+def test_delay_complaint_asking_what_happened_keeps_delay_explanation():
+    session_id = "test:delay-ask-cause"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "mera order bahut late aaya kya hua tha"})
+    result = Rules.resolve(
+        complaint="mera order bahut late aaya kya hua tha",
+        conversation_history=history,
+        order_value=168,
+        trust_score=82,
+        kitchen={"quality_out": "good", "prep_time_mins": 10, "temperature_check": "hot"},
+        fleet={"delay_mins": 22, "traffic_flag": True},
+        trust={"score": 82, "total_orders": 12},
+        order_details={"total_amount": 168, "status": "delivered", "delivered_at": "16th Apr 2026, 02:55 pm"},
+        order_items={"items": [{"name": "Classic Maggi", "price": 79}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "delay",
+            "issue_confidence": 0.95,
+            "info_query": "status",
+            "info_query_confidence": 0.95,
+            "turn_act": "ask_cause",
+            "turn_act_confidence": 0.9,
+        },
+    )
+
+    assert result["action"] == "info"
+    assert result["reason"] == "User asked for the cause of an identified issue"
+    assert "delay" in result["message"].lower() or "late" in result["message"].lower()
+
+
+def test_high_severity_foreign_object_followup_escalates_without_needing_explicit_refund_request():
+    session_id = "test:foreign-object-followup-escalates"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["order_items"] = {"items": [{"name": "Dhaba Style Chicken Curry Rice Bowl", "price": 269}]}
+
+    first_turns = [
+        (
+            "there was a piece of plastic in my chicken bowl",
+            {
+                "issue_type": "foreign_object",
+                "issue_confidence": 0.98,
+                "issue_severity": "high",
+                "active_item_name": "Dhaba Style Chicken Curry Rice Bowl",
+                "recommended_next_step": "live_capture",
+                "visual_evidence_useful": True,
+            },
+        ),
+        (
+            "this is outrageous",
+            {
+                "issue_type": "foreign_object",
+                "issue_confidence": 0.98,
+                "issue_severity": "high",
+                "active_item_name": "Dhaba Style Chicken Curry Rice Bowl",
+                "recommended_next_step": "escalate",
+                "turn_act": "none",
+                "turn_act_confidence": 0.9,
+            },
+        ),
+    ]
+
+    outputs = []
+    for msg, assessment in first_turns:
+        history.append({"role": "user", "content": msg})
+        result = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            order_value=756,
+            trust_score=85,
+            kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+            fleet={"delay_mins": 15, "traffic_flag": True},
+            trust=ctx["trust"],
+            order_details={"total_amount": 756},
+            order_items=ctx["order_items"],
+            session_id=session_id,
+            assessment=assessment,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+        outputs.append(result)
+
+    assert outputs[0]["action"] == "info"
+    assert outputs[1]["action"] == "escalate"
+    assert "can't close this properly" in outputs[1]["message"].lower()
+
+
+def test_benign_ingredient_mismatch_is_not_classified_as_foreign_object():
+    session_id = "test:ingredient-mismatch-not-foreign-object"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "there was a piece of vegetable in my chicken bowl"})
+    result = Rules.resolve(
+        complaint="there was a piece of vegetable in my chicken bowl",
+        conversation_history=history,
+        order_value=756,
+        trust_score=85,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 85, "total_orders": 20},
+        order_details={"total_amount": 756},
+        order_items={"items": [{"name": "Dhaba Style Chicken Curry Rice Bowl", "price": 269}]},
+        session_id=session_id,
+    )
+
+    assert result["_debug"]["issue_type"] != "foreign_object"
+
+
+def test_llm_overcall_to_foreign_object_is_downgraded_for_benign_ingredient_mismatch():
+    session_id = "test:ingredient-mismatch-downgrade"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "there was a piece of vegetable in my chicken bowl"})
+    result = Rules.resolve(
+        complaint="there was a piece of vegetable in my chicken bowl",
+        conversation_history=history,
+        order_value=756,
+        trust_score=85,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 85, "total_orders": 20},
+        order_details={"total_amount": 756},
+        order_items={"items": [{"name": "Dhaba Style Chicken Curry Rice Bowl", "price": 269}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "foreign_object",
+            "issue_confidence": 0.95,
+            "active_item_name": "Dhaba Style Chicken Curry Rice Bowl",
+            "issue_severity": "high",
+        },
+    )
+
+    assert result["_debug"]["issue_type"] == "quality"
+
+
+def test_strong_replacement_evidence_skips_coupon_loop_and_moves_to_confirmation():
+    session_id = "test:strong-replacement-skips-coupon-loop"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "dark chocolate oreo shake spilled badly"})
+    first = Rules.resolve(
+        complaint="dark chocolate oreo shake spilled badly",
+        conversation_history=history,
+        order_value=756,
+        trust_score=85,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 85, "total_orders": 20},
+        order_details={"total_amount": 756},
+        order_items={"items": [{"name": "Dark Chocolate Oreo Shake", "price": 189}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "spill_leak",
+            "issue_confidence": 0.95,
+            "active_item_name": "Dark Chocolate Oreo Shake",
+            "visual_evidence_useful": True,
+        },
+    )
+    history.append({"role": "bot", "content": first["message"]})
+
+    history.append({"role": "user", "content": "photo attached"})
+    second = Rules.resolve(
+        complaint="photo attached",
+        conversation_history=history,
+        order_value=756,
+        trust_score=85,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 85, "total_orders": 20},
+        order_details={"total_amount": 756},
+        order_items={"items": [{"name": "Dark Chocolate Oreo Shake", "price": 189}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "spill_leak",
+            "issue_confidence": 0.95,
+            "active_item_name": "Dark Chocolate Oreo Shake",
+            "requested_resolution": "replacement",
+            "requested_resolution_confidence": 0.95,
+            "visual_evidence_useful": True,
+        },
+        photo_url="https://example.com/shake.jpg",
+        photo_valid=True,
+        photo_in_session=True,
+    )
+    history.append({"role": "bot", "content": second["message"]})
+
+    history.append({"role": "user", "content": "replace it"})
+    third = Rules.resolve(
+        complaint="replace it",
+        conversation_history=history,
+        order_value=756,
+        trust_score=85,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 85, "total_orders": 20},
+        order_details={"total_amount": 756},
+        order_items={"items": [{"name": "Dark Chocolate Oreo Shake", "price": 189}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "spill_leak",
+            "issue_confidence": 0.95,
+            "active_item_name": "Dark Chocolate Oreo Shake",
+            "requested_resolution": "replacement",
+            "requested_resolution_confidence": 0.95,
+            "turn_act": "confirm",
+            "turn_act_confidence": 0.95,
+            "visual_evidence_useful": True,
+        },
+        photo_in_session=True,
+    )
+
+    assert second["action"] == "info"
+    assert second["reason"] == "Strong evidence supports moving directly to replacement confirmation"
+    assert third["action"] == "replacement"
+    assert "fresh dark chocolate oreo shake" in third["message"].lower()
+
+
+def test_escalated_case_does_not_reopen_into_photo_collection():
+    session_id = "test:escalated-case-stays-escalated"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "there was plastic in my food"})
+    first = Rules.resolve(
+        complaint="there was plastic in my food",
+        conversation_history=history,
+        order_value=756,
+        trust_score=85,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 85, "total_orders": 20},
+        order_details={"total_amount": 756},
+        order_items={"items": [{"name": "Dhaba Style Chicken Curry Rice Bowl", "price": 269}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "foreign_object",
+            "issue_confidence": 0.98,
+            "issue_severity": "high",
+            "active_item_name": "Dhaba Style Chicken Curry Rice Bowl",
+        },
+    )
+    history.append({"role": "bot", "content": first["message"]})
+
+    history.append({"role": "user", "content": "this is outrageous"})
+    second = Rules.resolve(
+        complaint="this is outrageous",
+        conversation_history=history,
+        order_value=756,
+        trust_score=85,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 85, "total_orders": 20},
+        order_details={"total_amount": 756},
+        order_items={"items": [{"name": "Dhaba Style Chicken Curry Rice Bowl", "price": 269}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "foreign_object",
+            "issue_confidence": 0.98,
+            "issue_severity": "high",
+            "active_item_name": "Dhaba Style Chicken Curry Rice Bowl",
+            "recommended_next_step": "escalate",
+        },
+    )
+    history.append({"role": "bot", "content": second["message"]})
+
+    history.append({"role": "user", "content": "but i need refund compensation"})
+    third = Rules.resolve(
+        complaint="but i need refund compensation",
+        conversation_history=history,
+        order_value=756,
+        trust_score=85,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 85, "total_orders": 20},
+        order_details={"total_amount": 756},
+        order_items={"items": [{"name": "Dhaba Style Chicken Curry Rice Bowl", "price": 269}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "foreign_object",
+            "issue_confidence": 0.98,
+            "issue_severity": "high",
+            "active_item_name": "Dhaba Style Chicken Curry Rice Bowl",
+            "requested_resolution": "refund",
+            "requested_resolution_confidence": 0.95,
+        },
+    )
+
+    assert second["action"] == "escalate"
+    assert third["action"] == "escalate"
+    assert third["reason"] == "Case already marked for manual review"
+
+
+def test_replacement_approval_does_not_reopen_confirmation_loop():
+    session_id = "test:replacement-approved-stays-approved"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    order_items = {"items": [{"name": "Dark Chocolate Oreo Shake", "price": 189}]}
+
+    turns = [
+        (
+            "shake spilled badly",
+            {
+                "issue_type": "spill_leak",
+                "issue_confidence": 0.95,
+                "active_item_name": "Dark Chocolate Oreo Shake",
+                "visual_evidence_useful": True,
+            },
+            None,
+            None,
+        ),
+        (
+            "photo attached",
+            {
+                "issue_type": "spill_leak",
+                "issue_confidence": 0.95,
+                "active_item_name": "Dark Chocolate Oreo Shake",
+                "requested_resolution": "replacement",
+                "requested_resolution_confidence": 0.95,
+                "visual_evidence_useful": True,
+            },
+            "https://example.com/shake.jpg",
+            True,
+        ),
+        (
+            "yes replace it",
+            {
+                "issue_type": "spill_leak",
+                "issue_confidence": 0.95,
+                "active_item_name": "Dark Chocolate Oreo Shake",
+                "requested_resolution": "replacement",
+                "requested_resolution_confidence": 0.95,
+                "turn_act": "confirm",
+                "turn_act_confidence": 0.95,
+            },
+            None,
+            None,
+        ),
+    ]
+
+    last = None
+    for complaint, assessment, photo_url, photo_valid in turns:
+        history.append({"role": "user", "content": complaint})
+        last = Rules.resolve(
+            complaint=complaint,
+            conversation_history=history,
+            order_value=756,
+            trust_score=85,
+            kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+            fleet={"delay_mins": 15, "traffic_flag": True},
+            trust={"score": 85, "total_orders": 20},
+            order_details={"total_amount": 756},
+            order_items=order_items,
+            session_id=session_id,
+            assessment=assessment,
+            photo_url=photo_url,
+            photo_valid=photo_valid,
+            photo_in_session=bool(photo_url),
+        )
+        history.append({"role": "bot", "content": last["message"]})
+
+    history.append({"role": "user", "content": "yeah get me another one"})
+    after = Rules.resolve(
+        complaint="yeah get me another one",
+        conversation_history=history,
+        order_value=756,
+        trust_score=85,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 85, "total_orders": 20},
+        order_details={"total_amount": 756},
+        order_items=order_items,
+        session_id=session_id,
+        assessment={
+            "issue_type": "spill_leak",
+            "issue_confidence": 0.95,
+            "active_item_name": "Dark Chocolate Oreo Shake",
+            "requested_resolution": "replacement",
+            "requested_resolution_confidence": 0.95,
+            "turn_act": "confirm",
+            "turn_act_confidence": 0.95,
+        },
+    )
+
+    assert last["action"] == "replacement"
+    assert after["action"] == "info"
+    assert after["reason"] == "Replacement already approved"
+
+
 def test_non_serious_refund_escalates_after_coupon_instead_of_auto_refund():
     session_id = "test:non-serious-refund-review"
     clear_session(session_id)
@@ -1693,10 +2166,10 @@ def test_high_severity_replacement_path_negotiates_before_confirming_replacement
     ctx["order_items"] = {"items": [{"name": "Roohafza Sharbat", "price": 99}]}
 
     for msg, assessment in [
-        ("sharbat was spilled", {"issue_type": "spill_leak", "issue_confidence": 0.91}),
-        ("i need a replacement", {"requested_resolution": "replacement", "requested_resolution_confidence": 0.94, "turn_act": "switch_resolution", "turn_act_confidence": 0.94, "issue_type": "spill_leak", "issue_confidence": 0.91}),
-        ("photo attached", {"issue_type": "spill_leak", "issue_confidence": 0.91, "requested_resolution": "replacement", "requested_resolution_confidence": 0.94},),
-        ("then arrange replacement", {"requested_resolution": "replacement", "requested_resolution_confidence": 0.94, "turn_act": "switch_resolution", "turn_act_confidence": 0.94}),
+        ("sharbat was spilled", {"issue_type": "spill_leak", "issue_confidence": 0.91, "active_item_name": "Roohafza Sharbat"}),
+        ("i need a replacement", {"requested_resolution": "replacement", "requested_resolution_confidence": 0.94, "turn_act": "switch_resolution", "turn_act_confidence": 0.94, "issue_type": "spill_leak", "issue_confidence": 0.91, "active_item_name": "Roohafza Sharbat"}),
+        ("photo attached", {"issue_type": "spill_leak", "issue_confidence": 0.91, "requested_resolution": "replacement", "requested_resolution_confidence": 0.94, "active_item_name": "Roohafza Sharbat"},),
+        ("then arrange replacement", {"issue_type": "spill_leak", "issue_confidence": 0.91, "active_item_name": "Roohafza Sharbat", "requested_resolution": "replacement", "requested_resolution_confidence": 0.94, "turn_act": "confirm", "turn_act_confidence": 0.94}),
     ]:
         history.append({"role": "user", "content": msg})
         result = Rules.resolve(
@@ -1717,9 +2190,8 @@ def test_high_severity_replacement_path_negotiates_before_confirming_replacement
         )
         history.append({"role": "bot", "content": result["message"]})
 
-    bot_messages = [entry["content"].lower() for entry in history if entry["role"] == "bot"]
-    assert any("coupon" in msg for msg in bot_messages)
-    assert not any("approved a fresh roohafza sharbat replacement" in msg for msg in bot_messages)
+    assert "fresh roohafza sharbat" in history[-1]["content"].lower()
+    assert result["action"] == "replacement"
 
 
 def test_high_severity_foreign_object_replacement_path_also_negotiates_before_confirming():

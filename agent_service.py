@@ -258,6 +258,8 @@ def _humanize_message(
                 "Do not start with 'Got it' unless the original already does. "
                 "Do not say 'should help', 'on the way', 'I asked the kitchen', 'I'll pass this to the team', or anything stronger than the original. "
                 "Do not mention internal economics, policy, or company loss. "
+                "Do not add product intent or product-sizing claims such as saying an item is meant to be small, snack-sized, standard, or expected. "
+                "Do not invent review steps, quality checks, or customer next actions unless the original already says them. "
                 'Reply in JSON only as {"message":"..."} and keep it to max 2 sentences.'
             ),
         },
@@ -267,8 +269,6 @@ def _humanize_message(
                 f"Customer said: {complaint}\n"
                 f"Recent bot message: {last_bot}\n"
                 f"Items in order: {', '.join(item_names)}\n"
-                f"Approved action: {resolution.get('action')}\n"
-                f"Approved amount: {resolution.get('amount')}\n"
                 f"Original message: {original}\n"
                 "Rewrite:"
             ),
@@ -284,10 +284,29 @@ def _humanize_message(
         parsed = _extract_json_object(rewritten)
         candidate = parsed.get("message") if parsed else rewritten
         if candidate:
+            if _humanizer_added_new_claims(candidate, original):
+                return resolution
             resolution["message"] = Rules._enforce_content({"message": candidate}).get("message", original)
     except Exception:
         pass
     return resolution
+
+
+def _humanizer_added_new_claims(candidate: str, original: str) -> bool:
+    candidate_lower = candidate.lower()
+    original_lower = original.lower()
+    forbidden_patterns = [
+        "meant to be",
+        "snack-sized",
+        "standard portion",
+        "quality check",
+        "team will review",
+        "review it again",
+        "you don't need to take any action",
+        "approved action",
+        "approved amount",
+    ]
+    return any(pattern in candidate_lower and pattern not in original_lower for pattern in forbidden_patterns)
 
 
 @app.post("/run")

@@ -77,3 +77,50 @@ def test_assessment_eval_marks_provider_error(monkeypatch):
     assert assessment == {}
     assert meta["status"] == "error"
     assert "provider down" in meta["error"]
+
+
+def test_humanize_prompt_does_not_include_internal_action_or_amount(monkeypatch):
+    captured = {}
+
+    def fake_call_text_with_trace(messages, **kwargs):
+        captured["messages"] = messages
+        return '{"message":"Short rewrite."}'
+
+    monkeypatch.setattr(agent_service, "_call_text_with_trace", fake_call_text_with_trace)
+    result = agent_service._humanize_message(
+        {
+            "action": "info",
+            "amount": 81,
+            "message": "I can offer a coupon here.",
+            "reason": "Offer coupon before refund or replacement",
+        },
+        complaint="I need compensation",
+        order_items={"items": [{"name": "Roohafza Sharbat", "price": 99}]},
+        history=[{"role": "user", "content": "I need compensation"}],
+    )
+
+    user_prompt = captured["messages"][1]["content"]
+    assert "Approved action" not in user_prompt
+    assert "Approved amount" not in user_prompt
+    assert result["message"] == "Short rewrite."
+
+
+def test_humanizer_rejects_invented_product_policy_claims(monkeypatch):
+    monkeypatch.setattr(
+        agent_service,
+        "_call_text_with_trace",
+        lambda messages, **kwargs: '{"message":"The samosa is meant to be a small snack-sized portion."}',
+    )
+    result = agent_service._humanize_message(
+        {
+            "action": "info",
+            "amount": 0,
+            "message": "I can't verify portion size reliably after delivery, but I've logged it against the kitchen.",
+            "reason": "No explicit compensation request",
+        },
+        complaint="there was not enough aloo in the samosa",
+        order_items={"items": [{"name": "Mini Punjabi Aloo Samosa", "price": 99}]},
+        history=[{"role": "user", "content": "there was not enough aloo in the samosa"}],
+    )
+
+    assert result["message"] == "I can't verify portion size reliably after delivery, but I've logged it against the kitchen."
