@@ -180,6 +180,8 @@ class Rules:
         if not matched_item and structured_selected_item_name:
             if structured_selected_item:
                 matched_item = structured_selected_item
+            elif _lower(structured_selected_item_name) == "entire order":
+                matched_item = {"name": "Entire order", "price": order_value}
         current_selected_name = matched_item.get("name") or state.get("active_item_name") or structured_selected_item_name
         if (
             customer_mentioned_item.get("name")
@@ -279,6 +281,7 @@ class Rules:
             issue_type = state.get("issue_type", issue_type)
         prep_anomaly = semantic_facts.prep_anomaly
         state["prep_anomaly"] = prep_anomaly
+        state["vague_quality_text"] = Rules._is_absurd_or_vague_quality_text(user_text)
         benign_veg_in_nonveg = semantic_facts.benign_ingredient_mismatch
         if issue_type == "foreign_object" and (prep_anomaly or benign_veg_in_nonveg):
             issue_type = "quality"
@@ -353,6 +356,8 @@ class Rules:
         if serious_dietary_violation and not (prep_anomaly or benign_veg_in_nonveg):
             issue_severity = "high"
         explicit_comp = wants in {"refund", "replacement", "coupon", "credit"}
+        if issue_type == "missing_item" and item_name.lower() == "entire order":
+            explicit_comp = True
         current_turn_has_photo = bool(photo_url)
         current_case_photo_key = Rules._photo_case_key(issue_type, item.get("name"))
         if current_turn_has_photo and photo_valid is not False:
@@ -365,6 +370,8 @@ class Rules:
             assessed_visual_evidence=assessed_visual_evidence,
             assessed_issue_confidence=assessed_issue_confidence,
         )
+        if issue_type == "missing_item" and item_name.lower() == "entire order":
+            needs_visual = True
         if prep_anomaly:
             needs_visual = False
         evidence_strength = Rules._evidence_strength(
@@ -474,7 +481,7 @@ class Rules:
             case_flow.clear_pending(state)
 
         if state.get("pending") == "semantic_clarification":
-            if Rules._accepted(user_text) or turn_act == "confirm":
+            if Rules._accepted(user_text) or turn_act == "confirm" or Rules._confirms_pending_semantic_issue(user_text):
                 confirmed_item_name = state.get("pending_semantic_item_name") or item_name
                 confirmed_issue_type = state.get("pending_semantic_issue_type") or prior_case_issue_type or issue_type
                 confirmed_fault = state.get("pending_semantic_fault") or fault
@@ -514,7 +521,12 @@ class Rules:
             user_text,
             state.get("case_issue_type", "other"),
         )
-        if not semantic_clarification_already_handled and Rules._semantic_clarification_needed(
+        semantic_clarification_blocked = (
+            item_name.lower() == "entire order"
+            or (current_turn_has_photo and issue_type in {"wrong_item", "missing_item", "spill_leak", "damaged"})
+            or (issue_type == "missing_item" and Rules._is_non_delivery_signal(user_text))
+        )
+        if not semantic_clarification_already_handled and not semantic_clarification_blocked and Rules._semantic_clarification_needed(
             assessment_provided=assessment_provided,
             selected_item_conflict=assessed_selected_item_conflict,
             semantic_risk=assessed_semantic_risk,
@@ -613,9 +625,7 @@ class Rules:
             response = {
                 "action": "escalate",
                 "amount": 0.0,
-                "message": Rules._review_escalation_message("case")
-                if escalation_repeat_count <= 1
-                else message_templates.review_repeat_message(),
+                "message": Rules._review_repeat_message(state, user_text, item_name),
                 "reason": "Case already marked for manual review",
             }
             Rules._store_terminal_state(state)
@@ -979,9 +989,7 @@ class Rules:
             return {
                 "action": "escalate",
                 "amount": 0.0,
-                "message": Rules._review_escalation_message("case")
-                if escalation_repeat_count <= 1
-                else message_templates.review_repeat_message(),
+                "message": Rules._review_repeat_message(state, _lower(complaint), item_name),
                 "reason": "Case already marked for manual review",
             }
 
@@ -1928,6 +1936,44 @@ class Rules:
     @staticmethod
     def _review_escalation_message(resolution_type: str) -> str:
         return message_templates.review_escalation_message(resolution_type)
+
+    @staticmethod
+    def _review_repeat_message(state: Dict[str, Any], user_text: str, item_name: str = "item") -> str:
+        text = _lower(user_text)
+        target = item_name if item_name and item_name != "item" else state.get("active_item_name") or "this order"
+        if any(term in text for term in ["supervisor", "human", "manager", "senior", "executive"]):
+            return (
+                f"I can't connect a live supervisor inside this chat. The {target} case is already in manual review, "
+                "and that is the path for a person to check it."
+            )
+        if any(term in text for term in ["refund", "cash", "money", "269", "full"]):
+            variants = [
+                "I've added that you still want cash back, not the chat option. I can't approve that automatically here, so the refund review is the next step.",
+                "The refund request is already with review. I can't convert it to an instant cash approval from this chat.",
+                "I have the refund ask captured. Repeating it here won't unlock an automatic payout, but it stays attached to the review.",
+            ]
+            return variants[(max(1, int(state.get("escalation_repeat_count") or 1)) - 1) % len(variants)]
+        if any(term in text for term in ["eat", "hungry", "food", "mood", "ruin"]):
+            return (
+                f"I've added that the {target} issue left you without a usable meal. "
+                "I can't create another automatic fix after review has started."
+            )
+        variants = [
+            f"The {target} case is already with review. I can add new details, but I can't approve another chat action here.",
+            "I have the case in review now. If you add a new detail, I'll keep it with the same review instead of restarting the flow.",
+            "The next step is still manual review. I don't want to keep repeating options that I can't approve from chat.",
+        ]
+        repeat_count = max(1, int(state.get("escalation_repeat_count") or 1))
+        return variants[(repeat_count - 1) % len(variants)]
+
+    @staticmethod
+    def _rotating_followup_message(state: Optional[Dict[str, Any]], key: str, variants: List[str]) -> str:
+        if not state or not variants:
+            return variants[0] if variants else ""
+        counts = state.setdefault("followup_message_counts", {})
+        count = int(counts.get(key) or 0)
+        counts[key] = count + 1
+        return variants[count % len(variants)]
 
     @staticmethod
     def _choose_issue_severity(
@@ -3033,6 +3079,23 @@ class Rules:
     def _is_non_delivery_signal(text: str) -> bool:
         if not text:
             return False
+        empty_delivery = any(
+            phrase in text
+            for phrase in [
+                "empty package",
+                "empty packet",
+                "empty parcel",
+                "empty bag",
+                "empty box",
+                "nothing inside",
+                "received empty",
+                "recieved empty",
+                "revived empty",
+                "package was empty",
+                "packet was empty",
+                "bag was empty",
+            ]
+        )
         delivered_not_received = (
             ("delivered" in text or "deliver" in text or "app" in text)
             and any(phrase in text for phrase in ["receive nahi", "not received", "did not receive", "didn't receive", "nahi mila", "not got"])
@@ -3040,7 +3103,7 @@ class Rules:
         rider_problem = any(phrase in text for phrase in ["rider", "delivery partner", "partner", "driver"]) and any(
             phrase in text for phrase in ["item nahi", "receive nahi", "not received", "delivered dikha", "answer nahi", "call"]
         )
-        return delivered_not_received or rider_problem or "order receive nahi hua" in text
+        return empty_delivery or delivered_not_received or rider_problem or "order receive nahi hua" in text
 
     @staticmethod
     def _is_wrong_order_signal(text: str) -> bool:
@@ -3124,6 +3187,24 @@ class Rules:
         return bool(
             re.search(r"\b(are|r)\s+(you|u)\s+(human|ai|bot|robot)\b", text)
             or re.search(r"\b(human|ai|bot|robot)\s+(agent|support)\b", text)
+        )
+
+    @staticmethod
+    def _confirms_pending_semantic_issue(text: str) -> bool:
+        if not text:
+            return False
+        lowered = _lower(text)
+        return any(
+            phrase in lowered
+            for phrase in [
+                "that is issue",
+                "that is the issue",
+                "that is fcking issue",
+                "that is fucking issue",
+                "same issue",
+                "this issue only",
+                "yes that issue",
+            ]
         )
 
     @staticmethod
@@ -3356,7 +3437,7 @@ class Rules:
             return None
         candidate = match.group(1).strip()
         if _lower(candidate) == "entire order":
-            return None
+            return "Entire order"
         item = Rules._find_item_by_name(order_items, candidate)
         return item.get("name") if item else candidate
 
@@ -3551,6 +3632,8 @@ class Rules:
         if issue_type == "wrong_item":
             return f"{prefix}This looks like the wrong item was packed before dispatch, so that points back to our packing side."
         if issue_type == "missing_item":
+            if item_name.lower() == "entire order":
+                return f"{prefix}An empty package means the order did not reach you in a usable state. I need a quick photo of what arrived before I can decide the fix in chat."
             return f"{prefix}It looks like part of the order may not have made it into the bag before dispatch."
         if issue_type == "foreign_object":
             return f"{prefix}This looks like a kitchen-side safety miss, so I'm noting it seriously."
@@ -3581,6 +3664,8 @@ class Rules:
             return f"{prefix}I can't verify portion size from logs after delivery, but I'm logging this against the kitchen as a quantity concern for the {item_name}."
 
         if fault == "kitchen":
+            if (state or {}).get("vague_quality_text"):
+                return f"{prefix}I've noted this as a quality complaint for the {item_name}. The logs don't verify the wording you used, so I won't guess a cause from them."
             if (state or {}).get("prep_anomaly"):
                 return f"{prefix}This looks like an ingredient mix-up on the {item_name}, so I’m treating it as a prep-side quality issue."
             quality = kitchen.get("quality_out") or "fair"
@@ -3588,8 +3673,12 @@ class Rules:
                 return f"{prefix}The kitchen check for the {item_name} was only marked fair, so I'm noting this as a prep-side quality issue."
             return f"{prefix}The kitchen check for the {item_name} was marked {quality}, but your quality complaint is still noted against prep."
         if fault == "delivery":
+            if (state or {}).get("vague_quality_text"):
+                return f"{prefix}I've noted this as a quality complaint for the {item_name}. The logs don't verify the wording you used, so I won't blame delivery without proof."
             delay = fleet.get("delay_mins") or "a few"
             return f"{prefix}The {item_name} looks okay from the kitchen side, but the delivery leg picked up about a {delay}-minute delay."
+        if (state or {}).get("vague_quality_text"):
+            return f"{prefix}I've noted this as a quality complaint for the {item_name}. The logs don't verify the wording you used, so I won't guess a cause from them."
         return f"{prefix}The logs don't point to one clean miss on either kitchen or delivery."
 
     @staticmethod
@@ -3608,9 +3697,21 @@ class Rules:
                 return f"I'm seeing about a {delay}-minute delivery delay on the {item_name}."
             return f"I'm seeing a delivery delay on the {item_name}."
         if issue_type == "wrong_item":
-            return "This still looks like a packing mix-up before dispatch."
+            variants = [
+                "I still have this logged as a wrong-item packing issue.",
+                "The issue I have captured is that the item you received did not match the order.",
+                "This is still being treated as a wrong item, not a delivery-status question.",
+            ]
+            return Rules._rotating_followup_message(state, "wrong_item", variants)
         if issue_type == "missing_item":
-            return "This still looks like one part of the order never made it into the bag."
+            if item_name.lower() == "entire order":
+                return "I've noted this as an empty-package complaint for the entire order."
+            variants = [
+                "I still have this logged as a missing-item issue.",
+                "The issue captured is that part of the order did not reach you.",
+                "This is still being treated as missing from the bag, not a normal status query.",
+            ]
+            return Rules._rotating_followup_message(state, "missing_item", variants)
         if issue_type == "foreign_object":
             return "This points back to a kitchen-side safety issue, not something that should have reached you."
         if issue_type == "spill_leak":
@@ -3643,6 +3744,8 @@ class Rules:
             return f"I've noted this as a prep-side quality issue for the {item_name}."
         if fault == "delivery":
             return f"The {item_name} looks okay from the kitchen side, and the delivery leg is the part that looks weaker here."
+        if (state or {}).get("vague_quality_text"):
+            return f"I've kept this as a quality complaint for the {item_name}, without guessing a cause from the logs."
         return "The logs still don't point to one clean cause."
 
     @staticmethod

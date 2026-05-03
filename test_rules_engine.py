@@ -4255,3 +4255,169 @@ def test_ordinary_quality_coupon_is_capped_without_strong_evidence():
     assert result["_debug"]["issue_type"] == "quality"
     assert result["_debug"]["coupon_amount"] <= 50
     assert "₹78" not in result["message"]
+
+
+def test_empty_package_entire_order_goes_to_live_capture_without_semantic_clarification():
+    session_id = "test:empty-package-entire-order"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    complaint = "Affected item is Entire order. The order delivered was inconsistent, I received empty package"
+    history.append({"role": "user", "content": complaint})
+    result = Rules.resolve(
+        complaint=complaint,
+        conversation_history=history,
+        order_value=756,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 756},
+        order_items={
+            "items": [
+                {"name": "Dhaba Style Chicken Curry Rice Bowl", "price": 269},
+                {"name": "Veg Pink Sauce Pasta", "price": 219},
+            ]
+        },
+        session_id=session_id,
+        assessment={
+            "issue_type": "other",
+            "issue_confidence": 0.8,
+            "active_item_name": "Entire order",
+            "semantic_risk": True,
+            "semantic_confidence": 0.9,
+            "recommended_next_step": "clarify",
+            "clarification_needed": True,
+        },
+    )
+
+    assert result["action"] == "live_capture"
+    assert get_session_state(session_id).get("issue_type") == "missing_item"
+    assert get_session_state(session_id).get("active_item_name") == "Entire order"
+    assert "are you asking about" not in result["message"].lower()
+
+
+def test_photo_turn_for_clear_wrong_item_does_not_reopen_semantic_clarification():
+    session_id = "test:wrong-item-photo-no-semantic-loop"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["order_items"] = {"items": [{"name": "Caesar Salad (Non-Veg)", "price": 259}]}
+    first = Rules.resolve(
+        complaint="wrong item, got veg sandwich instead of Caesar Salad",
+        conversation_history=[{"role": "user", "content": "wrong item, got veg sandwich instead of Caesar Salad"}],
+        order_value=627,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 15, "temperature_check": "cold"},
+        fleet={"delay_mins": 8, "traffic_flag": True},
+        trust=ctx["trust"],
+        order_details={"total_amount": 627},
+        order_items=ctx["order_items"],
+        session_id=session_id,
+    )
+    history.append({"role": "user", "content": "wrong item, got veg sandwich instead of Caesar Salad"})
+    history.append({"role": "bot", "content": first["message"]})
+    mark_photo_provided(session_id)
+
+    history.append({"role": "user", "content": "Refund, you delivered wrong item"})
+    result = Rules.resolve(
+        complaint="Refund, you delivered wrong item",
+        conversation_history=history,
+        order_value=627,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 15, "temperature_check": "cold"},
+        fleet={"delay_mins": 8, "traffic_flag": True},
+        trust=ctx["trust"],
+        order_details={"total_amount": 627},
+        order_items=ctx["order_items"],
+        session_id=session_id,
+        photo_url="https://example.com/proof.jpg",
+        photo_valid=True,
+        photo_in_session=session_has_photo(session_id),
+        assessment={
+            "issue_type": "wrong_item",
+            "issue_confidence": 0.9,
+            "requested_resolution": "refund",
+            "requested_resolution_confidence": 0.9,
+            "active_item_name": "Caesar Salad (Non-Veg)",
+            "semantic_risk": True,
+            "semantic_confidence": 0.9,
+            "recommended_next_step": "clarify",
+            "clarification_needed": True,
+        },
+    )
+
+    assert result["action"] == "info"
+    assert "confirm which item" not in result["message"].lower()
+    assert "coupon" in result["message"].lower() or "refund" in result["message"].lower()
+
+
+def test_review_repeat_messages_follow_latest_user_intent():
+    state = {"active_item_name": "Classic Cold Coffee", "escalation_repeat_count": 2}
+    refund = Rules._review_repeat_message(state, "GIVE ME MY REFUND", "Classic Cold Coffee")
+    supervisor = Rules._review_repeat_message(state, "I want supervisor", "Classic Cold Coffee")
+    hungry = Rules._review_repeat_message(state, "I am hungry and have no food", "Classic Cold Coffee")
+
+    assert "refund" in refund.lower() or "cash" in refund.lower()
+    assert "supervisor" in supervisor.lower()
+    assert "usable meal" in hungry.lower()
+    assert len({refund, supervisor, hungry}) == 3
+
+
+def test_vague_quality_copy_does_not_blame_delivery_delay():
+    session_id = "test:vague-quality-no-delay-blame"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    complaint = "Damaged or spilled Affected item is Mini Punjabi Aloo Samosa. Dead food"
+    history.append({"role": "user", "content": complaint})
+    result = Rules.resolve(
+        complaint=complaint,
+        conversation_history=history,
+        order_value=437,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 14, "temperature_check": "hot"},
+        fleet={"delay_mins": 3, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 437},
+        order_items={"items": [{"name": "Mini Punjabi Aloo Samosa", "price": 99}]},
+        session_id=session_id,
+    )
+
+    assert result["_debug"]["issue_type"] == "quality"
+    assert "delivery leg" not in result["message"].lower()
+    assert "3-minute delay" not in result["message"].lower()
+
+
+def test_semantic_clarification_issue_confirmation_is_understood():
+    session_id = "test:semantic-that-is-issue"
+    clear_session(session_id)
+    state = get_session_state(session_id)
+    state.update(
+        {
+            "pending": "semantic_clarification",
+            "pending_semantic_item_name": "Classic Cold Coffee",
+            "pending_semantic_issue_type": "wrong_item",
+            "pending_semantic_fault": "kitchen",
+            "pending_semantic_prep_anomaly": False,
+        }
+    )
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "That is fcking issue"})
+
+    result = Rules.resolve(
+        complaint="That is fcking issue",
+        conversation_history=history,
+        order_value=627,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 15, "temperature_check": "cold"},
+        fleet={"delay_mins": 8, "traffic_flag": True},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 627},
+        order_items={"items": [{"name": "Classic Cold Coffee", "price": 159}]},
+        session_id=session_id,
+    )
+
+    assert result["reason"] == "Semantic clarification confirmed"
+    assert "wrong-item issue" in result["message"].lower()
