@@ -296,8 +296,8 @@ def _conversation_cases() -> list[ConversationCase]:
                     },
                 },
             ),
-            expected_terminal_action="info",
-            expected_message_bits=("fresh classic cold coffee",),
+            expected_terminal_action="escalate",
+            expected_message_bits=("remake", "review"),
         ),
         ConversationCase(
             case_id="ord004-spill-needs-capture",

@@ -189,10 +189,15 @@ def style_warnings(message: str) -> list[str]:
 
 
 def attach_artifacts(state: dict, resolution: dict, case_state: dict) -> dict:
-    lifecycle = action_lifecycle(resolution.get("action"), float(resolution.get("amount") or 0.0), case_state)
-    incident = ops_incident(resolution.get("action"), case_state)
-    ticket = support_ticket(resolution.get("action"), resolution.get("reason", ""), case_state)
     warnings = style_warnings(resolution.get("message", ""))
+    if resolution.get("reason") == "LLM semantic guard requested clarification":
+        if warnings:
+            resolution["style_warnings"] = warnings
+        return resolution
+
+    lifecycle = action_lifecycle(resolution.get("action"), float(resolution.get("amount") or 0.0), case_state)
+    incident = None if _is_status_only_reason(resolution.get("reason", "")) else ops_incident(resolution.get("action"), case_state)
+    ticket = support_ticket(resolution.get("action"), resolution.get("reason", ""), case_state)
 
     state["case_state"] = case_state
     if lifecycle:
@@ -223,3 +228,13 @@ def attach_artifacts(state: dict, resolution: dict, case_state: dict) -> dict:
         ]
     }
     return resolution
+
+
+def _is_status_only_reason(reason: str) -> bool:
+    return reason in {
+        "Replacement already approved",
+        "User asked for active complaint status",
+        "User asked for approved replacement status",
+        "User asked for order information during an active resolution flow",
+        "User asked for order information, not a complaint resolution",
+    }

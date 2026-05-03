@@ -78,6 +78,45 @@ def test_attach_artifacts_persists_state_objects():
     assert result["case_state"]["selected_item"] == "Peri Peri French Fries"
 
 
+def test_attach_artifacts_skips_case_records_for_semantic_clarification():
+    state = {}
+    result = attach_artifacts(
+        state,
+        {
+            "action": "info",
+            "amount": 0,
+            "message": "I might be looking at the wrong item. Which item should I handle?",
+            "reason": "LLM semantic guard requested clarification",
+        },
+        _case_state(),
+    )
+
+    assert "case_state" not in state
+    assert "ops_incident" not in result
+    assert "case_state" not in result
+
+
+def test_attach_artifacts_skips_ops_incident_for_status_only_followup():
+    state = {}
+    result = attach_artifacts(
+        state,
+        {
+            "action": "info",
+            "amount": 0,
+            "message": "The fresh item has already been approved.",
+            "reason": "User asked for approved replacement status",
+        },
+        {
+            **_case_state(),
+            "evidence_status": "strong",
+        },
+    )
+
+    assert "case_state" in result
+    assert "ops_incident" not in result
+    assert state.get("ops_incidents") is None
+
+
 def test_style_warnings_catch_non_human_or_internal_copy():
     warnings = style_warnings("As per policy, approved action is refund to avoid company loss.")
 

@@ -414,6 +414,91 @@ def test_payment_query_ignores_item_semantic_conflict_guard():
     assert "which item" not in result["message"].lower()
 
 
+def test_semantic_clarification_confirmation_keeps_original_issue_context():
+    session_id = "test:semantic-clarification-confirmation-keeps-context"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["order_items"] = {"items": [{"name": "Butter Chicken Rice Bowl", "price": 269}]}
+
+    history.append({"role": "user", "content": "Something is missing from Butter Chicken Rice Bowl"})
+    first = Rules.resolve(
+        complaint="Something is missing from Butter Chicken Rice Bowl",
+        conversation_history=history,
+        order_value=269,
+        trust_score=ctx["trust"]["score"],
+        kitchen=ctx["kitchen"],
+        fleet=ctx["fleet"],
+        trust=ctx["trust"],
+        order_details={"total_amount": 269},
+        order_items=ctx["order_items"],
+        session_id=session_id,
+        assessment={
+            "issue_type": "missing_item",
+            "issue_confidence": 0.91,
+            "active_item_name": "Butter Chicken Rice Bowl",
+        },
+    )
+    history.append({"role": "bot", "content": first["message"]})
+
+    history.append({"role": "user", "content": "there was a piece of vegetable in my chicken bowl"})
+    clarification = Rules.resolve(
+        complaint="there was a piece of vegetable in my chicken bowl",
+        conversation_history=history,
+        order_value=269,
+        trust_score=ctx["trust"]["score"],
+        kitchen=ctx["kitchen"],
+        fleet=ctx["fleet"],
+        trust=ctx["trust"],
+        order_details={"total_amount": 269},
+        order_items=ctx["order_items"],
+        session_id=session_id,
+        assessment={
+            "issue_type": "quality",
+            "issue_confidence": 0.88,
+            "active_item_name": "Butter Chicken Rice Bowl",
+            "mentioned_item_name": "Butter Chicken Rice Bowl",
+            "semantic_risk": True,
+            "semantic_confidence": 0.93,
+            "semantic_risk_reason": "selected issue category does not match described ingredient issue",
+            "recommended_next_step": "clarify",
+            "clarification_needed": True,
+            "fault_hint": "kitchen",
+        },
+    )
+    history.append({"role": "bot", "content": clarification["message"]})
+
+    assert clarification["action"] == "info"
+    assert "right item" not in clarification["message"].lower()
+    assert get_session_state(session_id).get("pending") == "semantic_clarification"
+
+    history.append({"role": "user", "content": "yes"})
+    confirmed = Rules.resolve(
+        complaint="yes",
+        conversation_history=history,
+        order_value=269,
+        trust_score=ctx["trust"]["score"],
+        kitchen=ctx["kitchen"],
+        fleet=ctx["fleet"],
+        trust=ctx["trust"],
+        order_details={"total_amount": 269},
+        order_items=ctx["order_items"],
+        session_id=session_id,
+        assessment={
+            "turn_act": "confirm",
+            "turn_act_confidence": 0.9,
+            "issue_type": "other",
+            "issue_confidence": 0.2,
+        },
+    )
+
+    assert confirmed["action"] == "info"
+    assert "prep-side quality issue" in confirmed["message"].lower()
+    assert "logs still don't point" not in confirmed["message"].lower()
+    assert get_session_state(session_id).get("pending") is None
+
+
 def test_solid_food_sauce_spill_stays_damage_not_liquid_spill():
     assert Rules._detect_issue_type("Grilled Paneer Club Sandwich spill ho gaya", "Grilled Paneer Club Sandwich") == "damaged"
     assert Rules._strong_text_issue_override(
@@ -482,8 +567,8 @@ def test_unverifiable_replacement_request_pushes_coupon_then_escalates_review():
     assert "review" in outputs[4]["message"].lower()
 
 
-def test_low_risk_quality_replacement_persistence_moves_to_replacement_confirm():
-    session_id = "test:quality-replacement-soft-approve"
+def test_weak_evidence_quality_replacement_persistence_moves_to_review():
+    session_id = "test:quality-replacement-weak-evidence-review"
     clear_session(session_id)
 
     history = get_session(session_id)
@@ -519,13 +604,12 @@ def test_low_risk_quality_replacement_persistence_moves_to_replacement_confirm()
 
     assert outputs[1]["action"] == "info"
     assert "coupon" in outputs[1]["message"].lower()
-    assert outputs[3]["action"] == "info"
-    assert outputs[3]["reason"] == "Repeated replacement request qualifies for low-risk remake confirmation"
-    assert "fresh peri peri french fries" in outputs[3]["message"].lower()
+    assert outputs[3]["action"] == "escalate"
+    assert "review" in outputs[3]["message"].lower()
 
 
-def test_replacement_reaffirmation_counts_as_confirmation():
-    session_id = "test:replacement-reaffirmation-confirms"
+def test_replacement_reaffirmation_without_strong_evidence_does_not_auto_approve():
+    session_id = "test:replacement-reaffirmation-weak-evidence-review"
     clear_session(session_id)
 
     history = get_session(session_id)
@@ -560,8 +644,48 @@ def test_replacement_reaffirmation_counts_as_confirmation():
         history.append({"role": "bot", "content": last["message"]})
 
     assert last is not None
-    assert last["action"] == "replacement"
-    assert "fresh peri peri french fries replacement" in last["message"].lower()
+    assert last["action"] == "escalate"
+    assert "review" in last["message"].lower()
+
+
+def test_structured_item_conflict_asks_before_acting_on_selected_item():
+    session_id = "test:structured-item-conflict-before-action"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["order_items"] = {
+        "items": [
+            {"name": "Roohafza Sharbat", "price": 79},
+            {"name": "Dark Chocolate Oreo Shake", "price": 189},
+        ]
+    }
+
+    complaint = "Damaged or spilled Affected item is Dark Chocolate Oreo Shake. my roohafza was spilled"
+    history.append({"role": "user", "content": complaint})
+    result = Rules.resolve(
+        complaint=complaint,
+        conversation_history=history,
+        order_value=756,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 756},
+        order_items=ctx["order_items"],
+        session_id=session_id,
+        assessment={
+            "issue_type": "spill_leak",
+            "issue_confidence": 0.86,
+            "active_item_name": "Dark Chocolate Oreo Shake",
+            "fault_hint": "delivery",
+        },
+    )
+
+    assert result["action"] == "info"
+    assert "wrong item" in result["message"].lower() or "roohafza sharbat" in result["message"].lower()
+    assert "dark chocolate oreo shake was marked okay" not in result["message"].lower()
+    assert get_session_state(session_id).get("pending") == "semantic_clarification"
 
 
 def test_invalid_live_capture_escalates_without_compensation():
@@ -1053,6 +1177,135 @@ def test_replacement_approval_does_not_reopen_confirmation_loop():
     assert last["action"] == "replacement"
     assert after["action"] == "info"
     assert after["reason"] == "Replacement already approved"
+
+
+def test_replacement_status_survives_refund_review_request():
+    session_id = "test:replacement-status-survives-refund-review"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    order_items = {"items": [{"name": "Dark Chocolate Oreo Shake", "price": 189}]}
+
+    turns = [
+        (
+            "shake spilled badly",
+            {
+                "issue_type": "spill_leak",
+                "issue_confidence": 0.95,
+                "issue_severity": "medium",
+                "active_item_name": "Dark Chocolate Oreo Shake",
+                "visual_evidence_useful": True,
+            },
+            None,
+            None,
+        ),
+        (
+            "photo attached",
+            {
+                "issue_type": "spill_leak",
+                "issue_confidence": 0.95,
+                "issue_severity": "medium",
+                "active_item_name": "Dark Chocolate Oreo Shake",
+                "requested_resolution": "replacement",
+                "requested_resolution_confidence": 0.95,
+                "visual_evidence_useful": True,
+            },
+            "https://example.com/shake.jpg",
+            True,
+        ),
+        (
+            "yes replace it",
+            {
+                "issue_type": "spill_leak",
+                "issue_confidence": 0.95,
+                "issue_severity": "medium",
+                "active_item_name": "Dark Chocolate Oreo Shake",
+                "requested_resolution": "replacement",
+                "requested_resolution_confidence": 0.95,
+                "turn_act": "confirm",
+                "turn_act_confidence": 0.95,
+            },
+            None,
+            None,
+        ),
+    ]
+
+    replacement = None
+    for complaint, assessment, photo_url, photo_valid in turns:
+        history.append({"role": "user", "content": complaint})
+        replacement = Rules.resolve(
+            complaint=complaint,
+            conversation_history=history,
+            order_value=756,
+            trust_score=85,
+            kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+            fleet={"delay_mins": 15, "traffic_flag": True},
+            trust={"score": 85, "total_orders": 20},
+            order_details={"total_amount": 756},
+            order_items=order_items,
+            session_id=session_id,
+            assessment=assessment,
+            photo_url=photo_url,
+            photo_valid=photo_valid,
+            photo_in_session=bool(photo_url),
+        )
+        history.append({"role": "bot", "content": replacement["message"]})
+
+    assert replacement["action"] == "replacement"
+
+    history.append({"role": "user", "content": "can I get a refund instead?"})
+    refund_review = Rules.resolve(
+        complaint="can I get a refund instead?",
+        conversation_history=history,
+        order_value=756,
+        trust_score=85,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 85, "total_orders": 20},
+        order_details={"total_amount": 756},
+        order_items=order_items,
+        session_id=session_id,
+        assessment={
+            "issue_type": "spill_leak",
+            "issue_confidence": 0.95,
+            "issue_severity": "medium",
+            "active_item_name": "Dark Chocolate Oreo Shake",
+            "requested_resolution": "refund",
+            "requested_resolution_confidence": 0.95,
+            "turn_act": "switch_resolution",
+            "turn_act_confidence": 0.95,
+        },
+    )
+    history.append({"role": "bot", "content": refund_review["message"]})
+
+    assert refund_review["action"] == "escalate"
+    assert get_session_state(session_id).get("last_action") == "escalate"
+    assert get_session_state(session_id).get("approved_replacement_item_name") == "Dark Chocolate Oreo Shake"
+
+    history.append({"role": "user", "content": "in how much time will my replacemetn arrive?"})
+    status = Rules.resolve(
+        complaint="in how much time will my replacemetn arrive?",
+        conversation_history=history,
+        order_value=756,
+        trust_score=85,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 85, "total_orders": 20},
+        order_details={"total_amount": 756},
+        order_items=order_items,
+        session_id=session_id,
+        assessment={
+            "issue_type": "other",
+            "issue_confidence": 0.2,
+            "turn_act": "ask_status",
+            "turn_act_confidence": 0.8,
+        },
+    )
+
+    assert status["action"] == "info"
+    assert status["reason"] == "User asked for approved replacement status"
+    assert "15 to 20 mins" in status["message"]
+    assert "already marked for review" not in status["message"].lower()
 
 
 def test_emotional_followup_does_not_reclassify_established_case():

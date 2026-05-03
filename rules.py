@@ -135,11 +135,44 @@ class Rules:
         assessed_negotiation_strength = Rules._validated_enum(
             assessment.get("negotiation_strength"), Rules.ALLOWED_NEGOTIATION_STRENGTHS
         )
+        structured_selected_item_name = Rules._structured_selected_item_name(complaint, order_items)
+        customer_free_text = Rules._customer_free_text(complaint)
+        customer_mentioned_item = Rules._match_item(order_items, customer_free_text) if customer_free_text else {}
+        structured_selected_item = (
+            Rules._find_item_by_name(order_items, structured_selected_item_name)
+            if structured_selected_item_name
+            else {}
+        )
+        structured_item_conflict = bool(
+            structured_selected_item.get("name")
+            and customer_mentioned_item.get("name")
+            and _lower(structured_selected_item.get("name")) != _lower(customer_mentioned_item.get("name"))
+            and not Rules._complaint_mentions_item(customer_free_text, structured_selected_item)
+        )
 
         if assessed_item_name:
             item_from_assessment = Rules._find_item_by_name(order_items, assessed_item_name)
             if item_from_assessment:
                 matched_item = item_from_assessment
+        if structured_item_conflict:
+            matched_item = structured_selected_item
+        if not matched_item and structured_selected_item_name:
+            if structured_selected_item:
+                matched_item = structured_selected_item
+        current_selected_name = matched_item.get("name") or state.get("active_item_name") or structured_selected_item_name
+        if (
+            customer_mentioned_item.get("name")
+            and current_selected_name
+            and _lower(customer_mentioned_item.get("name")) != _lower(current_selected_name)
+            and not Rules._complaint_mentions_item(customer_free_text, {"name": current_selected_name})
+        ):
+            assessed_selected_item_conflict = True
+            assessed_mentioned_item_name = customer_mentioned_item.get("name")
+            assessed_semantic_risk = True
+            assessed_semantic_confidence = max(assessed_semantic_confidence or 0.0, 0.95)
+            assessed_semantic_risk_reason = "customer text names a different order item than the selected active item"
+            assessed_recommended_next_step = "clarify"
+            assessed_clarification_needed = True
         prior_case_issue_type = state.get("case_issue_type")
         prior_case_issue_severity = state.get("case_issue_severity")
         prior_case_evidence_strength = state.get("case_evidence_strength")
@@ -405,6 +438,35 @@ class Rules:
         if state.get("pending") == "photo" and current_turn_has_photo and photo_valid is not False:
             state["pending"] = None
 
+        if state.get("pending") == "semantic_clarification":
+            if Rules._accepted(user_text) or turn_act == "confirm":
+                confirmed_item_name = state.get("pending_semantic_item_name") or item_name
+                confirmed_issue_type = state.get("pending_semantic_issue_type") or prior_case_issue_type or issue_type
+                confirmed_fault = state.get("pending_semantic_fault") or fault
+                confirmed_prep_anomaly = bool(state.get("pending_semantic_prep_anomaly"))
+                state["pending"] = None
+                state["desired_resolution"] = None
+                state["issue_type"] = confirmed_issue_type
+                state["case_issue_type"] = confirmed_issue_type
+                state["conversation_mode"] = "active_complaint"
+                state["active_item_name"] = confirmed_item_name
+                state["prep_anomaly"] = confirmed_prep_anomaly
+                response = {
+                    "action": "info",
+                    "amount": 0.0,
+                    "message": Rules._semantic_confirmation_message(
+                        item_name=confirmed_item_name,
+                        issue_type=confirmed_issue_type,
+                        fault=confirmed_fault,
+                        prep_anomaly=confirmed_prep_anomaly,
+                    ),
+                    "reason": "Semantic clarification confirmed",
+                }
+                return Rules._enforce_content(response, state)
+            if Rules._has_concrete_issue_signal(user_text):
+                state["pending"] = None
+                state["desired_resolution"] = None
+
         if is_abusive:
             response = {
                 "action": "escalate",
@@ -423,7 +485,13 @@ class Rules:
             recommended_next_step=assessed_recommended_next_step,
             clarification_needed=assessed_clarification_needed,
         ):
-            state["pending"] = None
+            state["pending"] = "semantic_clarification"
+            state["pending_semantic_item_name"] = item_name
+            state["pending_semantic_issue_type"] = issue_type
+            state["pending_semantic_fault"] = fault
+            state["pending_semantic_prep_anomaly"] = prep_anomaly
+            state["pending_semantic_message"] = complaint
+            state["pending_semantic_reason"] = assessed_semantic_risk_reason
             state["desired_resolution"] = None
             response = {
                 "action": "info",
@@ -476,6 +544,18 @@ class Rules:
                 "reason": "Photo failed verification",
             }
             Rules._store_terminal_state(state)
+            return Rules._enforce_content(response, state)
+
+        if Rules._is_replacement_status_query(_lower(complaint), state) or (
+            state.get("approved_replacement_item_name") and info_query == "status"
+        ):
+            state["pending"] = None
+            response = {
+                "action": "info",
+                "amount": 0.0,
+                "message": Rules._replacement_status_message(state),
+                "reason": "User asked for approved replacement status",
+            }
             return Rules._enforce_content(response, state)
 
         if state.get("last_action") == "escalate" and info_query == "none":
@@ -787,6 +867,17 @@ class Rules:
                 "reason": "User asked for reassurance after replacement approval",
             }
 
+        if Rules._is_replacement_status_query(_lower(complaint), state) or (
+            state.get("approved_replacement_item_name") and info_query == "status"
+        ):
+            state["pending"] = None
+            return {
+                "action": "info",
+                "amount": 0.0,
+                "message": Rules._replacement_status_message(state),
+                "reason": "User asked for approved replacement status",
+            }
+
         if state.get("last_action") == "escalate" and info_query == "none":
             state["pending"] = None
             state["conversation_mode"] = "review"
@@ -805,7 +896,7 @@ class Rules:
             return {
                 "action": "info",
                 "amount": 0.0,
-                "message": Rules._info_query_message("status", order_details, order_items, fleet, state, last_bot_msg),
+                "message": Rules._replacement_status_message(state),
                 "reason": "Replacement already approved",
             }
 
@@ -1111,7 +1202,7 @@ class Rules:
                         "message": Rules._replacement_confirm_message(item_name),
                         "reason": "Repeated replacement request qualifies for low-risk remake confirmation",
                     }
-                if state["coupon_push_count"] > Rules.MAX_COUPON_REINFORCEMENT_TURNS:
+                if state["coupon_push_count"] >= Rules.MAX_COUPON_REINFORCEMENT_TURNS:
                     state["pending"] = None
                     state["desired_resolution"] = None
                     return {
@@ -1656,18 +1747,7 @@ class Rules:
         evidence_strength: str,
         economic_preference: Optional[str],
     ) -> bool:
-        if issue_type not in {"quality", "temperature"}:
-            return False
-        if evidence_strength != "weak":
-            return False
-        if trust_score < Rules.REFUND_TRUST_THRESHOLD:
-            return False
-        replacement_cost = Rules._estimated_replacement_cost(order_value, item_price)
-        if replacement_cost > 320:
-            return False
-        if economic_preference not in {None, "replacement", "coupon"}:
-            return False
-        return True
+        return False
 
     @staticmethod
     def _replacement_steer_message(item_name: str, hard_block_refund: bool) -> str:
@@ -1962,11 +2042,25 @@ class Rules:
     ) -> str:
         if mentioned_item and selected_item and selected_item != "item" and _lower(mentioned_item) != _lower(selected_item):
             return f"I might be looking at the wrong item. You selected {selected_item}, but your message sounds like {mentioned_item}. Which item should I handle?"
+        if mentioned_item and selected_item and selected_item != "item":
+            return f"I’m looking at {selected_item}. Your message sounds like a different issue from the option selected. Should I handle it based on what you described?"
         if mentioned_item:
             return f"I want to make sure I handle the right item. Are you asking about {mentioned_item}?"
         if semantic_risk_reason:
             return "I want to make sure I don't handle this under the wrong issue. Can you confirm which item and issue I should check?"
         return "I want to make sure I don't handle the wrong thing. Which item and issue should I check?"
+
+    @staticmethod
+    def _semantic_confirmation_message(
+        item_name: str,
+        issue_type: str,
+        fault: str,
+        prep_anomaly: bool,
+    ) -> str:
+        if prep_anomaly or (issue_type == "quality" and fault == "kitchen"):
+            return f"Got it. I’m treating this as a prep-side quality issue for the {item_name}, not the selected issue category. Tell me if you want this only logged or want me to check what resolution is possible."
+        label = Rules._issue_label(issue_type)
+        return f"Got it. I’ll handle this as a {label} for the {item_name}. Tell me if you want this only logged or want me to check what resolution is possible."
 
     @staticmethod
     def _canonical_item_name(order_items: Dict[str, Any], item_name: Optional[str]) -> Optional[str]:
@@ -3339,6 +3433,25 @@ class Rules:
         return scored[0][1] if scored and scored[0][0] > 0 else {}
 
     @staticmethod
+    def _structured_selected_item_name(complaint: str, order_items: Dict[str, Any]) -> Optional[str]:
+        match = re.search(r"\bAffected item is\s+(.+?)\.", complaint or "", flags=re.IGNORECASE)
+        if not match:
+            return None
+        candidate = match.group(1).strip()
+        if _lower(candidate) == "entire order":
+            return None
+        item = Rules._find_item_by_name(order_items, candidate)
+        return item.get("name") if item else candidate
+
+    @staticmethod
+    def _customer_free_text(complaint: str) -> str:
+        text = complaint or ""
+        match = re.search(r"\bAffected item is\s+.+?\.\s*(.*)$", text, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            return text
+        return match.group(1).strip()
+
+    @staticmethod
     def _find_item_by_name(order_items: Dict[str, Any], item_name: str) -> Dict[str, Any]:
         items = order_items.get("items", []) if isinstance(order_items, dict) else []
         target = _lower(item_name)
@@ -3644,9 +3757,8 @@ class Rules:
                 return f"{lead} ₹{float(total):.0f}."
             return "I’m not getting the total cleanly right now, but I can still help with the order."
         if info_query == "status":
-            if state.get("last_action") == "replacement":
-                item_name = state.get("last_item_name") or state.get("active_item_name") or "replacement"
-                return f"The fresh {item_name} has been approved. I don't have a live ETA here yet, but these usually go out in around 15 to 20 mins and you'll see the update in-app."
+            if state.get("approved_replacement_item_name") or state.get("last_action") == "replacement":
+                return Rules._replacement_status_message(state)
             delivered = order_details.get("delivered_at")
             status = order_details.get("status", "unknown")
             delay = fleet.get("delay_mins")
@@ -3666,8 +3778,48 @@ class Rules:
         return "Tell me what you want to know about the order and I’ll pull that up."
 
     @staticmethod
+    def _replacement_status_message(state: Dict[str, Any]) -> str:
+        item_name = (
+            state.get("approved_replacement_item_name")
+            or state.get("last_item_name")
+            or state.get("active_item_name")
+            or "replacement"
+        )
+        return f"The fresh {item_name} has already been approved. I don't have a live ETA here yet, but these usually go out in around 15 to 20 mins and you'll see the update in-app."
+
+    @staticmethod
+    def _is_replacement_status_query(text: str, state: Dict[str, Any]) -> bool:
+        if not state.get("approved_replacement_item_name"):
+            return False
+        if not text:
+            return False
+        replacement_terms = [
+            "replacement",
+            "replacemetn",
+            "replace",
+            "remake",
+            "fresh item",
+            "fresh one",
+        ]
+        status_terms = [
+            "when",
+            "time",
+            "how much time",
+            "how long",
+            "eta",
+            "arrive",
+            "arrives",
+            "arriving",
+            "deliver",
+            "delivery",
+            "status",
+            "update",
+        ]
+        return any(term in text for term in replacement_terms) and any(term in text for term in status_terms)
+
+    @staticmethod
     def _assurance_message(state: Dict[str, Any], issue_type: str, fault: str) -> str:
-        item_name = state.get("last_item_name") or state.get("active_item_name") or "item"
+        item_name = state.get("approved_replacement_item_name") or state.get("last_item_name") or state.get("active_item_name") or "item"
         if issue_type == "temperature" or "cold" in _lower(item_name):
             return f"I've flagged this as a fresh cold-item remake for the kitchen. It should leave cold this time, but I don't want to promise what delivery time does after pickup."
         if fault == "delivery":
@@ -3757,6 +3909,8 @@ class Rules:
         state["last_action"] = action
         if action == "replacement":
             state["last_item_name"] = item_name
+            state["approved_replacement_item_name"] = item_name
+            state["approved_replacement_status"] = "approved"
         if action == "refund":
             state["last_amount"] = response.get("amount", 0.0)
 

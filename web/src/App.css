@@ -106,7 +106,7 @@ body {
 .status-icon {
   width: 18px;
   height: 18px;
-  background: linear-gradient(135deg, var(--swish-orange) 0%, #34c363 100%);
+  background: var(--swish-orange);
   color: white;
   border-radius: 50%;
   display: flex;
@@ -199,7 +199,7 @@ body {
 
 .btn-primary {
   padding: 12px;
-  background: linear-gradient(135deg, var(--swish-orange) 0%, #34c363 100%);
+  background: var(--swish-orange);
   border: 1px solid transparent;
   border-radius: 8px;
   font-size: 15px;
@@ -210,7 +210,7 @@ body {
 }
 
 .btn-primary:hover {
-  background: linear-gradient(135deg, var(--swish-orange-deep) 0%, var(--swish-orange) 100%);
+  background: var(--swish-orange-deep);
 }
 
 .support-intake-container {
@@ -486,7 +486,7 @@ body {
 }
 
 .message.user .message-content {
-  background: linear-gradient(135deg, var(--swish-purple) 0%, var(--swish-purple-deep) 100%);
+  background: var(--swish-orange);
   color: white;
   border-bottom-right-radius: 4px;
 }
@@ -514,7 +514,7 @@ body {
 .action-badge {
   margin-top: 8px;
   padding: 6px 12px;
-  background: linear-gradient(135deg, var(--swish-orange) 0%, #34c363 100%);
+  background: var(--swish-orange);
   color: white;
   border-radius: 12px;
   font-size: 13px;
@@ -590,7 +590,7 @@ body {
   width: 24px;
   height: 24px;
   border-radius: 50%;
-  background: linear-gradient(135deg, var(--swish-orange) 0%, #34c363 100%);
+  background: var(--swish-orange);
   color: white;
   border: none;
   cursor: pointer;
@@ -634,7 +634,7 @@ body {
 
 .send-btn {
   padding: 6px 12px;
-  background: linear-gradient(135deg, var(--swish-orange) 0%, #34c363 100%);
+  background: var(--swish-orange);
   color: white;
   border: none;
   border-radius: 20px;
@@ -650,7 +650,7 @@ body {
 }
 
 .send-btn:hover:not(:disabled) {
-  background: linear-gradient(135deg, var(--swish-orange-deep) 0%, var(--swish-orange) 100%);
+  background: var(--swish-orange-deep);
 }
 
 .send-btn:disabled {
@@ -705,7 +705,7 @@ body {
   padding: 10px;
   border: none;
   border-radius: 10px;
-  background: linear-gradient(135deg, var(--swish-orange) 0%, #34c363 100%);
+  background: var(--swish-orange);
   color: white;
   font-size: 14px;
   font-weight: 600;
@@ -817,7 +817,7 @@ body {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  background: linear-gradient(180deg, rgba(0, 0, 0, 0.52) 0%, rgba(0, 0, 0, 0) 100%);
+  background: rgba(0, 0, 0, 0.28);
 }
 
 .capture-close {
@@ -854,7 +854,7 @@ body {
 }
 
 .capture-overlay-bottom {
-  background: linear-gradient(0deg, rgba(0, 0, 0, 0.72) 0%, rgba(0, 0, 0, 0) 100%);
+  background: rgba(0, 0, 0, 0.42);
 }
 
 .capture-progress-shell {
@@ -874,7 +874,7 @@ body {
 .capture-progress-fill {
   height: 100%;
   border-radius: 999px;
-  background: linear-gradient(90deg, #2eae58 0%, #5ed485 100%);
+  background: var(--swish-orange);
   transition: width 0.1s linear;
 }
 
@@ -911,7 +911,7 @@ body {
   border: none;
   border-radius: 999px;
   padding: 15px 18px;
-  background: linear-gradient(135deg, #2eae58 0%, #5ed485 100%);
+  background: var(--swish-orange);
   color: white;
   font-size: 15px;
   font-weight: 800;
