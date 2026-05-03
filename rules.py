@@ -167,12 +167,29 @@ class Rules:
             if assessment_provided
             else Rules._detect_requested_resolution(complaint, state)
         )
+        detected_info_query = Rules._detect_info_query(complaint)
+        forced_info_query = "none"
+        conversation_mode = state.get("conversation_mode")
+        if (
+            conversation_mode == "info_only"
+            and wants == "none"
+            and not Rules._has_concrete_issue_signal(user_text)
+        ):
+            issue_type = "info_query"
+            forced_info_query = detected_info_query if detected_info_query != "none" else state.get("last_info_query", "status")
+        if Rules._is_plain_info_query(user_text, detected_info_query, state):
+            issue_type = "info_query"
+            wants = "none"
+            forced_info_query = detected_info_query if detected_info_query != "none" else state.get("last_info_query", "status")
         payment_or_billing_query = Rules._is_payment_or_billing_query(user_text) or (
-            state.get("case_issue_type") == "info_query" and Rules._is_followup_or_evidence_turn(user_text)
+            state.get("case_issue_type") == "info_query"
+            and Rules._is_followup_or_evidence_turn(user_text)
+            and not Rules._has_strong_new_issue_signal(user_text, "info_query")
         )
         if payment_or_billing_query:
             issue_type = "info_query"
             wants = "none"
+            forced_info_query = forced_info_query if forced_info_query != "none" else state.get("last_info_query", "status")
         if Rules._is_non_delivery_signal(user_text):
             issue_type = "missing_item"
         if Rules._is_resolution_only_turn(complaint) and state.get("issue_type") and (
@@ -193,6 +210,11 @@ class Rules:
         if issue_type == "foreign_object" and prep_anomaly:
             issue_type = "quality"
         issue_type = Rules._strong_text_issue_override(user_text, issue_type)
+        strong_new_issue_from_info = (
+            state.get("case_issue_type") == "info_query"
+            and Rules._has_strong_new_issue_signal(user_text, "info_query")
+            and issue_type not in {"info_query", "other"}
+        )
         if payment_or_billing_query:
             issue_type = "info_query"
             wants = "none"
@@ -203,6 +225,10 @@ class Rules:
             assessment_provided=assessment_provided,
             complaint=complaint,
         ) or ("none" if assessment_provided else Rules._detect_info_query(complaint))
+        if forced_info_query != "none":
+            info_query = forced_info_query
+        if strong_new_issue_from_info:
+            info_query = "none"
         assurance_query = bool(assessed_assurance_query) or (False if assessment_provided else Rules._detect_assurance_query(complaint))
         turn_act = Rules._choose_turn_act(
             assessed_turn_act=assessed_turn_act,
@@ -307,6 +333,10 @@ class Rules:
             case_issue_severity = issue_severity
             case_evidence_strength = evidence_strength
             case_economic_preference = economic_preference
+        if issue_type == "info_query" and (not prior_case_issue_type or prior_case_issue_type == "info_query"):
+            state["conversation_mode"] = "info_only"
+        elif issue_type != "info_query":
+            state["conversation_mode"] = "active_complaint"
         coupon_amount = Rules._coupon_amount(order_value, item.get("price"))
         coupon_amount = Rules._adjust_coupon_amount(
             coupon_amount=coupon_amount,
@@ -330,6 +360,8 @@ class Rules:
         state["tone_guardrail"] = tone_guardrail
         state["negotiation_allowed"] = negotiation_allowed
         state["negotiation_strength"] = negotiation_strength
+        if info_query != "none":
+            state["last_info_query"] = info_query
 
         if state.get("pending") == "photo" and current_turn_has_photo and photo_valid is not False:
             state["pending"] = None
@@ -342,9 +374,10 @@ class Rules:
                 "reason": "Abusive language detected",
             }
             Rules._store_terminal_state(state)
-            return Rules._enforce_content(response)
+            return Rules._enforce_content(response, state)
 
         if photo_url and photo_valid is False:
+            state["last_action"] = "escalate"
             response = {
                 "action": "escalate",
                 "amount": 0.0,
@@ -352,18 +385,90 @@ class Rules:
                 "reason": "Photo failed verification",
             }
             Rules._store_terminal_state(state)
-            return Rules._enforce_content(response)
+            return Rules._enforce_content(response, state)
 
         if state.get("last_action") == "escalate" and info_query == "none":
-            issue_type = state.get("case_issue_type", issue_type)
+            issue_type = prior_case_issue_type or state.get("case_issue_type", issue_type)
+            state["issue_type"] = issue_type
+            state["case_issue_type"] = issue_type
+            state["conversation_mode"] = "review"
+            state["escalation_repeat_count"] = int(state.get("escalation_repeat_count") or 0) + 1
             response = {
                 "action": "escalate",
                 "amount": 0.0,
-                "message": Rules._review_escalation_message("case"),
+                "message": Rules._review_escalation_message("case")
+                if state["escalation_repeat_count"] <= 1
+                else "This is already marked for review. I don't want to keep repeating the same step, and there isn't another auto action I can take in chat.",
                 "reason": "Case already marked for manual review",
             }
             Rules._store_terminal_state(state)
-            return Rules._enforce_content(response)
+            return Rules._enforce_content(response, state)
+
+        if Rules._is_cancel_or_resolved_turn(user_text):
+            state["pending"] = None
+            state["desired_resolution"] = None
+            state["case_resolved_by_user"] = True
+            state["conversation_mode"] = "resolved"
+            state["issue_type"] = prior_case_issue_type or state.get("case_issue_type") or issue_type
+            state["case_issue_type"] = prior_case_issue_type or state.get("case_issue_type") or issue_type
+            response = {
+                "action": "info",
+                "amount": 0.0,
+                "message": "Okay, I won't take any compensation action on this. If something else is off with the order, tell me and I'll look at that separately.",
+                "reason": "User cancelled the complaint flow",
+            }
+            Rules._store_terminal_state(state)
+            return Rules._enforce_content(response, state)
+
+        if state.get("case_resolved_by_user") and (
+            not Rules._has_concrete_issue_signal(user_text)
+            or Rules._is_case_scope_or_support_pressure_turn(user_text)
+            or Rules._is_generic_info_followup(user_text)
+        ):
+            state["conversation_mode"] = "resolved"
+            state["issue_type"] = prior_case_issue_type or state.get("case_issue_type") or issue_type
+            state["case_issue_type"] = prior_case_issue_type or state.get("case_issue_type") or issue_type
+            state["resolved_repeat_count"] = int(state.get("resolved_repeat_count") or 0) + 1
+            resolved_messages = [
+                "Nothing else is open from my side on this order right now.",
+                "You're good here. I haven't taken any refund, coupon, or replacement action.",
+                "No further action is pending on this order from my side.",
+            ]
+            response = {
+                "action": "info",
+                "amount": 0.0,
+                "message": resolved_messages[(state["resolved_repeat_count"] - 1) % len(resolved_messages)],
+                "reason": "Resolved case follow-up",
+            }
+            Rules._store_terminal_state(state)
+            return Rules._enforce_content(response, state)
+
+        if state.get("pending") == "photo" and Rules._cannot_provide_photo(user_text):
+            state["pending"] = None
+            state["desired_resolution"] = None
+            response = {
+                "action": "escalate",
+                "amount": 0.0,
+                "message": "No problem. Without a photo I can't approve this directly in chat, so this needs a review.",
+                "reason": "Photo required but customer cannot provide evidence",
+            }
+            Rules._store_terminal_state(state)
+            return Rules._enforce_content(response, state)
+
+        if state.get("pending") == "photo" and not current_turn_has_photo:
+            state["photo_prompt_count"] = int(state.get("photo_prompt_count") or 0) + 1
+            if state["photo_prompt_count"] > 1:
+                state["pending"] = None
+                state["desired_resolution"] = None
+                state["last_action"] = "escalate"
+                response = {
+                    "action": "escalate",
+                    "amount": 0.0,
+                    "message": "I still need evidence to approve this in chat, so I'm moving it to review instead of asking again.",
+                    "reason": "Photo evidence not provided after repeated prompt",
+                }
+                Rules._store_terminal_state(state)
+                return Rules._enforce_content(response, state)
 
         photo_required = Rules._needs_photo(
             explicit_comp=explicit_comp,
@@ -379,7 +484,7 @@ class Rules:
                 "message": Rules._photo_message(order_value, issue_type),
                 "reason": "Photo required before compensation decision",
             }
-            return Rules._enforce_content(response)
+            return Rules._enforce_content(response, state)
 
         pending = state.get("pending")
         if pending and info_query != "none":
@@ -390,7 +495,7 @@ class Rules:
                 "reason": "User asked for order information during an active resolution flow",
             }
             Rules._store_terminal_state(state)
-            response = Rules._enforce_content(response)
+            response = Rules._enforce_content(response, state)
             response["_debug"] = {
                 "issue_type": issue_type,
                 "issue_type_source": "fallback",
@@ -469,7 +574,7 @@ class Rules:
             )
 
         Rules._mark_terminal_action(state, response, item_name)
-        response = Rules._enforce_content(response)
+        response = Rules._enforce_content(response, state)
         response["_debug"] = {
             "issue_type": issue_type,
             "issue_type_source": "llm" if assessment_provided and issue_type == assessed_issue_type and assessed_issue_type else "fallback",
@@ -542,10 +647,14 @@ class Rules:
 
         if state.get("last_action") == "escalate" and info_query == "none":
             state["pending"] = None
+            state["conversation_mode"] = "review"
+            state["escalation_repeat_count"] = int(state.get("escalation_repeat_count") or 0) + 1
             return {
                 "action": "escalate",
                 "amount": 0.0,
-                "message": Rules._review_escalation_message("case"),
+                "message": Rules._review_escalation_message("case")
+                if state["escalation_repeat_count"] <= 1
+                else "This is already marked for review. I don't want to keep repeating the same step, and there isn't another auto action I can take in chat.",
                 "reason": "Case already marked for manual review",
             }
 
@@ -747,6 +856,21 @@ class Rules:
 
         replacement_requested = wants == "replacement" if assessment_provided else Rules._mentions_replacement(user_text)
         refund_requested = wants == "refund" if assessment_provided else Rules._mentions_refund(user_text)
+
+        if (
+            Rules._is_case_scope_or_support_pressure_turn(user_text)
+            and not replacement_requested
+            and not refund_requested
+            and turn_act != "confirm"
+        ):
+            state["pending"] = None
+            state["desired_resolution"] = None
+            return {
+                "action": "escalate",
+                "amount": 0.0,
+                "message": Rules._review_escalation_message(desired),
+                "reason": "Coupon negotiation stalled under escalation pressure",
+            }
 
         if desired == "replacement" or (turn_act == "switch_resolution" and replacement_requested) or replacement_requested:
             state["coupon_push_count"] = push_count + 1
@@ -1040,6 +1164,15 @@ class Rules:
             turn_act = "confirm"
 
         if not (turn_act == "confirm" or (not assessment_provided and turn_act == "none" and Rules._accepted(user_text))):
+            if Rules._is_case_scope_or_support_pressure_turn(user_text):
+                state["pending"] = None
+                state["desired_resolution"] = None
+                return {
+                    "action": "escalate",
+                    "amount": 0.0,
+                    "message": Rules._review_escalation_message("replacement"),
+                    "reason": "Replacement confirmation stalled under escalation pressure",
+                }
             return {
                 "action": "info",
                 "amount": 0.0,
@@ -1730,14 +1863,20 @@ class Rules:
             return "foreign_object"
         if Rules._is_wrong_order_signal(text):
             return "wrong_item"
-        if any(word in text for word in ["missing", "didn't get", "did not get", "not delivered", "left out"]):
+        if any(word in text for word in ["missing", "didn't get", "did not get", "not delivered", "left out", "not there", "was not there"]):
             return "missing_item"
         if any(word in text for word in ["hair", "plastic", "stone", "glass", "insect", "bug"]):
             return "foreign_object"
-        if any(word in text for word in ["spilled", "leaked", "leaking", "opened and spilled", "burst open"]):
+        if any(word in text for word in ["spilled", "leaked", "leaking", "leked", "leking", "opened and spilled", "burst open"]):
             return "spill_leak"
         if any(word in text for word in ["damaged", "crushed", "broken", "soggy packaging"]):
             return "damaged"
+        if re.search(r"\b(qty|qnty|quantity|portion)\s+(?:vry\s+|very\s+)?(less|low|kam)\b", text):
+            return "portion_size"
+        if re.search(r"\b(?:tiny|small)\s+(?:portion|serving|pieces?|pices)\b", text):
+            return "portion_size"
+        if re.search(r"\b(?:pieces?|pices)\s+(?:tha|the|were|was)?.{0,20}\b(?:tiny|small|less|kam)\b", text):
+            return "portion_size"
         if any(
             word in text
             for word in [
@@ -1771,7 +1910,7 @@ class Rules:
             return "quality"
         if Rules._is_temperature_signal(text):
             return "temperature"
-        if any(word in text for word in ["late", "delay", "delayed", "where is my order", "eta"]):
+        if any(word in text for word in ["late", "delay", "delayed", "where is my order"]) or re.search(r"\beta\b", text):
             return "delay"
         if item_name and item_name.lower() in text:
             return "quality"
@@ -1781,6 +1920,8 @@ class Rules:
     def _strong_text_issue_override(text: str, current_issue_type: str) -> str:
         if not text:
             return current_issue_type
+        if any(phrase in text for phrase in ["don't treat this as", "dont treat this as", "do not treat this as", "not a spill", "not spill"]):
+            return current_issue_type
         if Rules._is_payment_or_billing_query(text):
             return "info_query"
         if Rules._is_non_delivery_signal(text):
@@ -1789,6 +1930,12 @@ class Rules:
             return "wrong_item"
         if Rules._is_spill_contamination_signal(text):
             return "spill_leak"
+        if Rules._looks_like_open_lid_or_packaging(text):
+            return "spill_leak" if current_issue_type == "spill_leak" else current_issue_type
+        if re.search(r"\b(mark|log|note)\s+(?:this|it)?\s*(?:as\s+)?(?:a\s+)?spill", text):
+            return "spill_leak"
+        if re.search(r"\b(late|delay|delayed)\b", text):
+            return "delay"
         if Rules._is_temperature_signal(text):
             return "temperature"
         if any(phrase in text for phrase in ["order hi nahi", "not my order", "different items", "kisi aur ka naam", "someone else"]):
@@ -1821,15 +1968,15 @@ class Rules:
                 "andar",
             )
         )
-        if re.search(r"\b(spill|spilled|spillage|leak|leaked|leaking|gir gaya|gir gya|gir gayi|gir gayi thi)\b", text):
+        if re.search(r"\b(spill|spilled|spillage|leak|leaked|leaking|leked|leking|gir gaya|gir gya|gir gayi|gir gayi thi)\b", text):
             return "spill_leak" if spill_context else "damaged"
         if "bag me spill" in text or "bag mein spill" in text or "andar spill" in text:
             return "spill_leak"
-        if re.search(r"\b(quantity|qty|portion)\s+(bahut\s+)?(kam|less|low)\b", text):
+        if re.search(r"\b(quantity|qty|qnty|portion)\s+(bahut\s+|vry\s+|very\s+)?(kam|less|low)\b", text):
             return "portion_size"
-        if re.search(r"\b(kam|less)\s+(quantity|portion)\b", text):
+        if re.search(r"\b(kam|less)\s+(quantity|qty|qnty|portion)\b", text):
             return "portion_size"
-        if any(phrase in text for phrase in ["bahut kam thi", "bahut kam tha", "quantity kam thi", "quantity kam tha", "size very small", "size bahut small", "pieces small"]):
+        if any(phrase in text for phrase in ["bahut kam thi", "bahut kam tha", "quantity kam thi", "quantity kam tha", "size very small", "size bahut small", "pieces small", "pices small", "qty issue", "qnty issue"]):
             return "portion_size"
         return current_issue_type
 
@@ -1887,6 +2034,18 @@ class Rules:
     def _looks_like_dietary_violation(text: str) -> bool:
         if not text:
             return False
+        allergen_markers = ["allergy", "allergic", "allergen"]
+        allergen_terms = [
+            "peanut",
+            "peanuts",
+            "nut",
+            "nuts",
+            "cashew",
+            "dairy",
+            "milk",
+        ]
+        if any(term in text for term in allergen_markers) and any(term in text for term in allergen_terms):
+            return True
         non_veg_terms = [
             "chicken",
             "chick",
@@ -1972,14 +2131,32 @@ class Rules:
     def _has_concrete_issue_signal(text: str) -> bool:
         if not text:
             return False
-        concrete_keywords = [
+        concrete_phrases = [
+            "not hot",
+            "cold food",
+            "wrong item",
+            "wrong order",
+            "didn't get",
+            "did not get",
+            "not delivered",
+            "bad taste",
+            "too little",
+            "not enough",
+            "less quantity",
+            "small portion",
+            "lid open",
+            "lid was open",
+            "lid ws open",
+        ]
+        if any(phrase in text for phrase in concrete_phrases):
+            return True
+        concrete_tokens = {
             "cold",
             "hot",
             "late",
             "delay",
             "delayed",
             "missing",
-            "wrong",
             "spilled",
             "spill",
             "leak",
@@ -1994,7 +2171,6 @@ class Rules:
             "insect",
             "portion",
             "quantity",
-            "small",
             "taste",
             "burnt",
             "raw",
@@ -2003,12 +2179,25 @@ class Rules:
             "uncooked",
             "undercooked",
             "overcooked",
-        ]
-        return any(keyword in text for keyword in concrete_keywords)
+            "qty",
+            "qnty",
+            "pices",
+            "pieces",
+            "lid",
+            "opened",
+            "open",
+        }
+        tokens = set(re.findall(r"[a-z0-9]+", text))
+        return bool(tokens & concrete_tokens)
 
     @staticmethod
     def _has_strong_new_issue_signal(text: str, current_issue_type: str) -> bool:
         if not text:
+            return False
+        if "actually" in text and Rules._has_concrete_issue_signal(text):
+            detected = Rules._strong_text_issue_override(text, Rules._detect_issue_type(text))
+            return detected not in {"info_query", "other", current_issue_type}
+        if Rules._is_case_scope_or_support_pressure_turn(text):
             return False
         detected = Rules._strong_text_issue_override(text, Rules._detect_issue_type(text))
         if detected in {"info_query", "other"}:
@@ -2017,14 +2206,203 @@ class Rules:
             return False
         if current_issue_type == "temperature" and detected == "delay":
             return False
+        if Rules._has_concrete_issue_signal(text):
+            return True
         if Rules._is_followup_or_evidence_turn(text):
             return False
-        return Rules._has_concrete_issue_signal(text)
+        return False
+
+    @staticmethod
+    def _is_plain_info_query(text: str, detected_info_query: str, state: Dict[str, Any]) -> bool:
+        if not text:
+            return False
+        if Rules._mentions_refund(text) or Rules._mentions_replacement(text) or "coupon" in text or "credit" in text:
+            return False
+        if Rules._is_non_delivery_signal(text) or Rules._is_wrong_order_signal(text):
+            return False
+        if detected_info_query != "none" and not any(term in text for term in ["late", "delay", "delayed", "missing", "wrong", "spill", "leak", "cold food", "not hot"]):
+            return True
+        if state.get("case_issue_type") == "info_query" and Rules._is_generic_info_followup(text):
+            return True
+        return False
+
+    @staticmethod
+    def _is_generic_info_followup(text: str) -> bool:
+        if not text:
+            return False
+        if Rules._looks_like_issue_label_correction(text):
+            return True
+        if Rules._looks_like_open_lid_or_packaging(text):
+            return True
+        phrases = [
+            "what should i do now",
+            "what should i do",
+            "can you be specific",
+            "be specific",
+            "what have you noted",
+            "what have you noted for this order",
+            "is there any resolution",
+            "don't ask the same thing",
+            "dont ask the same thing",
+            "if nothing else is needed",
+            "tell me clearly",
+            "will this show anywhere",
+            "fine, continue",
+            "just keep it simple",
+            "final next step",
+            "what is the final next step",
+            "explain in simple words",
+            "simple words",
+            "which item are you talking",
+            "not sure if this is refund or support",
+            "wrong option maybe",
+            "selected the wrong option",
+            "selected wrong option maybe",
+            "wrong category maybe",
+            "selected the wrong category",
+            "selected wrong category maybe",
+            "one clear next step",
+            "clear next step",
+            "simple batao",
+            "note properly",
+            "clear resolution",
+            "that's all i needed",
+            "thanks",
+            "thank you",
+        ]
+        return any(phrase in text for phrase in phrases)
+
+    @staticmethod
+    def _is_cancel_or_resolved_turn(text: str) -> bool:
+        if not text:
+            return False
+        patterns = [
+            "never mind",
+            "nevermind",
+            "found it",
+            "found in bag",
+            "mil gaya",
+            "mila bag",
+            "issue solved",
+            "resolved now",
+            "don't refund",
+            "dont refund",
+            "no refund needed",
+            "please don't refund",
+            "please dont refund",
+            "close this",
+            "just close",
+            "nothing needed",
+            "no action needed",
+        ]
+        return any(pattern in text for pattern in patterns)
+
+    @staticmethod
+    def _cannot_provide_photo(text: str) -> bool:
+        if not text:
+            return False
+        return any(
+            phrase in text
+            for phrase in [
+                "camera not working",
+                "camra not working",
+                "camra not wrking",
+                "can't upload photo",
+                "cannot upload photo",
+                "cant upload photo",
+                "can't share photo",
+                "cannot share photo",
+                "no photo",
+                "photo nahi",
+                "image nahi",
+                "can't upload image",
+                "cannot upload image",
+            ]
+        )
+
+    @staticmethod
+    def _is_case_scope_or_support_pressure_turn(text: str) -> bool:
+        if not text:
+            return False
+        if Rules._looks_like_issue_label_correction(text):
+            return True
+        if Rules._looks_like_open_lid_or_packaging(text):
+            return True
+        scope_phrases = [
+            "don't convert this",
+            "dont convert this",
+            "do not convert this",
+            "don't call this",
+            "dont call this",
+            "do not call this",
+            "not quality",
+            "not a quality",
+            "not food quality",
+            "not become missing",
+            "not become quality",
+            "dont make this taste issue",
+            "don't make this taste issue",
+            "should not become",
+            "mark this as",
+            "log this as",
+            "note this as",
+            "read the chat",
+            "copy-paste answer",
+            "copy paste answer",
+            "same copy-paste",
+            "same copy paste",
+            "stop asking about food",
+            "order was fine",
+            "food is fine",
+            "food okay",
+            "senior person",
+            "wasting my time",
+            "what you have noted",
+            "what you can actually do",
+            "not asking for sympathy",
+            "proper resolution",
+            "final answer",
+            "documented against my order",
+            "refusing to help",
+            "solution is not acceptable",
+            "solution not acceptable",
+            "not acceptable to me",
+            "explain in simple words",
+            "simple words",
+            "which item are you talking",
+            "not sure if this is refund or support",
+            "one clear next step",
+            "clear next step",
+            "fast please",
+            "taking so long",
+            "make me repeat",
+            "give final answer",
+            "no more time",
+            "practical soln",
+            "practical solution",
+            "plz solve",
+            "plz dont clos",
+            "dont clos",
+            "wat u noted",
+            "i need reslution",
+            "reslution only",
+            "nxt step",
+            "don't create ticket",
+            "dont create ticket",
+            "simple batao",
+            "note properly",
+            "clear resolution",
+        ]
+        return any(phrase in text for phrase in scope_phrases)
 
     @staticmethod
     def _is_followup_or_evidence_turn(text: str) -> bool:
         if not text:
             return False
+        if Rules._looks_like_issue_label_correction(text):
+            return True
+        if Rules._looks_like_open_lid_or_packaging(text):
+            return True
         followup_phrases = [
             "photo",
             "video",
@@ -2034,6 +2412,12 @@ class Rules:
             "review",
             "escalate",
             "supervisor",
+            "don't ask the same thing",
+            "dont ask the same thing",
+            "please don't ask",
+            "please dont ask",
+            "if nothing else is needed",
+            "tell me clearly",
             "update",
             "app",
             "what happens now",
@@ -2067,6 +2451,76 @@ class Rules:
             "mere items",
             "my items",
             "baaki items",
+            "don't convert this",
+            "dont convert this",
+            "don't call this",
+            "dont call this",
+            "do not call this",
+            "mark this as",
+            "log this as",
+            "note this as",
+            "read the chat",
+            "copy-paste answer",
+            "copy paste answer",
+            "stop asking about food",
+            "what you have noted",
+            "what you can actually do",
+            "what can you do",
+            "without photo",
+            "without image",
+            "camera",
+            "image",
+            "describe it",
+            "lid was open",
+            "keep asking for image",
+            "keep asking for photo",
+            "proper resolution",
+            "documented against my order",
+            "what should i do",
+            "can you be specific",
+            "be specific",
+            "is there any resolution",
+            "if nothing else is needed",
+            "tell me clearly",
+            "just keep it simple",
+            "final next step",
+            "wrong option selected",
+            "selected wrong option",
+            "wrong option maybe",
+            "selected the wrong option",
+            "selected wrong option maybe",
+            "wrong category selected",
+            "selected wrong category",
+            "wrong category maybe",
+            "selected the wrong category",
+            "selected wrong category maybe",
+            "separate cases",
+            "different issue",
+            "explain in simple words",
+            "simple words",
+            "which item are you talking",
+            "not sure if this is refund or support",
+            "one clear next step",
+            "clear next step",
+            "fast please",
+            "taking so long",
+            "make me repeat",
+            "give final answer",
+            "no more time",
+            "practical soln",
+            "practical solution",
+            "plz solve",
+            "plz dont clos",
+            "dont clos",
+            "wat u noted",
+            "i need reslution",
+            "reslution only",
+            "nxt step",
+            "don't create ticket",
+            "dont create ticket",
+            "simple batao",
+            "note properly",
+            "clear resolution",
         ]
         if any(phrase in text for phrase in followup_phrases):
             return True
@@ -2091,6 +2545,7 @@ class Rules:
         if not text:
             return False
         direct_patterns = [
+            "wrong order",
             "wrong item",
             "different item",
             "different items",
@@ -2100,6 +2555,8 @@ class Rules:
             "not my order",
             "kisi aur ka naam",
             "someone else",
+            "receipt was someone else",
+            "receipt is someone else",
         ]
         if any(pattern in text for pattern in direct_patterns):
             return True
@@ -2113,6 +2570,29 @@ class Rules:
         contaminated = ["box", "bag", "container", "food", "item", "pasta", "bowl"]
         return any(term in text for term in spillable) and any(term in text for term in contaminated) and any(
             phrase in text for phrase in ["lag gaya", "lag gya", "spread", "soaked", "wet"]
+        )
+
+    @staticmethod
+    def _looks_like_issue_label_correction(text: str) -> bool:
+        if not text:
+            return False
+        return bool(
+            re.search(r"\b(?:wrong|incorrect)\s+(?:option|category|issue|complaint|flow)\b", text)
+            or re.search(
+                r"\b(?:selected|select|chose|choose|picked|pick)\b.{0,30}\b(?:wrong|incorrect)\b.{0,30}\b(?:option|category|issue|complaint|flow)\b",
+                text,
+            )
+        )
+
+    @staticmethod
+    def _looks_like_open_lid_or_packaging(text: str) -> bool:
+        if not text:
+            return False
+        return bool(
+            re.search(r"\blid\s+(?:w(?:a)?s\s+|is\s+)?open(?:ed)?\b", text)
+            or re.search(r"\bopen(?:ed)?\s+lid\b", text)
+            or re.search(r"\b(seal|cap|cover)\s+(?:w(?:a)?s\s+|is\s+)?open(?:ed)?\b", text)
+            or re.search(r"\b(container|cup|bottle|box)\s+(?:w(?:a)?s\s+|is\s+)?open(?:ed)?\b", text)
         )
 
     @staticmethod
@@ -2147,7 +2627,13 @@ class Rules:
             return False
         if state.get("last_action") == "escalate":
             return True
-        if info_query != "none" or issue_type == "info_query":
+        if case_issue_type == "info_query":
+            if Rules._is_payment_or_billing_query(text):
+                return True
+            if Rules._is_case_scope_or_support_pressure_turn(text) or Rules._is_followup_or_evidence_turn(text):
+                return not Rules._has_strong_new_issue_signal(text, case_issue_type)
+            if not Rules._has_concrete_issue_signal(text):
+                return Rules._is_emotional_followup(text)
             return False
         sticky_types = {
             "missing_item",
@@ -2158,16 +2644,21 @@ class Rules:
             "portion_size",
             "temperature",
             "delay",
+            "quality",
         }
-        if case_issue_type in sticky_types and Rules._is_followup_or_evidence_turn(text):
+        if case_issue_type in sticky_types and (
+            Rules._is_followup_or_evidence_turn(text) or Rules._is_case_scope_or_support_pressure_turn(text)
+        ):
             return not Rules._has_strong_new_issue_signal(text, case_issue_type)
+        if info_query != "none" or issue_type == "info_query":
+            return False
         if wants in {"refund", "replacement", "coupon", "credit"}:
             return not Rules._has_strong_new_issue_signal(text, case_issue_type)
-        if turn_act not in {"none", "clarify"}:
-            return False
         if Rules._has_concrete_issue_signal(text):
             return False
-        return Rules._is_emotional_followup(text)
+        if turn_act not in {"none", "clarify"}:
+            return True
+        return True
 
     @staticmethod
     def _detect_info_query(complaint: str) -> str:
@@ -2180,16 +2671,24 @@ class Rules:
             "show items",
             "what did i order",
             "what was in this order",
+            "item list",
         ]
         total_patterns = [
             "how much was this order",
             "what was the total",
             "order total",
             "how much did i pay",
+            "payment method",
+            "which payment method",
         ]
         status_patterns = [
             "where is my order",
             "what is the status",
+            "is it delivered",
+            "was it delivered",
+            "what time was it delivered",
+            "who was the delivery partner",
+            "delivery partner",
             "status batao",
             "status btao",
             "status kya hai",
@@ -2199,7 +2698,6 @@ class Rules:
             "dikha raha hai",
             "when was it delivered",
             "how long",
-            "eta",
             "when will it arrive",
             "when will i get it",
             "how long will it take",
@@ -2209,7 +2707,7 @@ class Rules:
             return "items"
         if any(pattern in text for pattern in total_patterns):
             return "total"
-        if any(pattern in text for pattern in status_patterns):
+        if any(pattern in text for pattern in status_patterns) or re.search(r"\beta\b", text):
             return "status"
         return "none"
 
@@ -2249,6 +2747,7 @@ class Rules:
             patterns = [
                 r"\brefund\s+(nahi|nahin|not)\b",
                 r"\b(no|not|dont|don't|do not)\s+(want\s+)?refund\b",
+                r"\bnot\s+asking\s+for\b.{0,40}\brefund\b",
                 r"\brefund\s+nahi\s+chahiye\b",
             ]
         else:
@@ -2591,7 +3090,15 @@ class Rules:
             status = order_details.get("status", "unknown")
             delay = fleet.get("delay_mins")
             if delivered:
-                return f"This order is marked {status} and it shows as delivered at {delivered}."
+                lead = Rules._pick_opening(
+                    [
+                        f"This order is marked {status} and it shows as delivered at {delivered}.",
+                        f"It shows as {status}, delivered at {delivered}.",
+                        f"Delivery is complete on our side, with delivery time listed as {delivered}.",
+                    ],
+                    last_bot_msg,
+                )
+                return lead
             if delay:
                 return f"It’s still in progress and running about {delay} mins behind right now."
             return f"This order is marked {status} right now."
@@ -2709,7 +3216,7 @@ class Rules:
         return result if len(result) >= 15 else "Got it."
 
     @staticmethod
-    def _enforce_content(response: Dict[str, Any]) -> Dict[str, Any]:
+    def _enforce_content(response: Dict[str, Any], state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         message = response.get("message", "").strip()
         if Rules._contains_false_promise(message):
             message = Rules._remove_false_promises(message)
@@ -2724,8 +3231,51 @@ class Rules:
         if len(sentences) > 3:
             message = " ".join(sentences[:3])
 
-        response["message"] = message if message else "Got it."
+        message = message if message else "Got it."
+        if state is not None:
+            message = Rules._dedupe_message(message, state)
+        response["message"] = message
         return response
+
+    @staticmethod
+    def _dedupe_message(message: str, state: Dict[str, Any]) -> str:
+        normalized = re.sub(r"\s+", " ", message.strip().lower())
+        if not normalized:
+            return message
+        recent = state.setdefault("recent_bot_messages", [])
+        if normalized not in recent:
+            recent.append(normalized)
+            state["recent_bot_messages"] = recent[-20:]
+            return message
+
+        suffixes = [
+            "Same update from my side.",
+            "Nothing has changed on this since my last message.",
+            "That is still the latest I can see.",
+            "I don't have a different update to add here.",
+            "The answer is still the same on my side.",
+            "I don't want to keep restating it differently.",
+            "There is no new action pending from me here.",
+            "That is still where this stands.",
+            "I have the same note on this order right now.",
+            "No extra step has opened up from my side.",
+            "I still don't have a different action to take here.",
+            "The order note has not changed.",
+            "I have already captured this part.",
+            "There is nothing new I need from you on that point.",
+            "That remains the current update.",
+            "I am not seeing a new change to report.",
+            "The same order context is still attached.",
+            "I have not changed the case from what I said above.",
+            "There is no fresh update beyond that.",
+            "That is still the cleanest answer I can give here.",
+        ]
+        repeat_count = int(state.get("repeat_message_count") or 0) + 1
+        state["repeat_message_count"] = repeat_count
+        candidate = f"{message} {suffixes[(repeat_count - 1) % len(suffixes)]}"
+        recent.append(re.sub(r"\s+", " ", candidate.strip().lower()))
+        state["recent_bot_messages"] = recent[-20:]
+        return candidate
 
 
 def _evict_expired_sessions() -> None:

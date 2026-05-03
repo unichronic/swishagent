@@ -2771,10 +2771,12 @@ def test_delay_only_case_does_not_become_food_quality_or_replacement():
     first = _run_turn(session_id, "order 25 minute late tha but food okay hai", order_value=168)
     second = _run_turn(session_id, "coupon milega kya delay ke liye?", order_value=168)
     third = _run_turn(session_id, "can you confirm what you have noted?", order_value=168)
+    fourth = _run_turn(session_id, "Don't convert this into food quality complaint", order_value=168)
 
     assert first["_debug"]["issue_type"] == "delay"
     assert second["_debug"]["issue_type"] == "delay"
     assert third["_debug"]["issue_type"] == "delay"
+    assert fourth["_debug"]["issue_type"] == "delay"
     assert "fresh item" not in third["message"].lower()
 
 
@@ -2796,10 +2798,14 @@ def test_payment_billing_query_does_not_become_food_quality():
     first = _run_turn(session_id, "payment cut gaya but order fail ho gaya")
     second = _run_turn(session_id, "UPI se amount debit hua")
     third = _run_turn(session_id, "refund timeline batao")
+    fourth = _run_turn(session_id, "Stop asking about food, order was fine")
+    fifth = _run_turn(session_id, "I have already explained this twice, read the chat properly.")
 
     assert first["_debug"]["issue_type"] == "info_query"
     assert second["_debug"]["issue_type"] == "info_query"
     assert third["_debug"]["issue_type"] == "info_query"
+    assert fourth["_debug"]["issue_type"] == "info_query"
+    assert fifth["_debug"]["issue_type"] == "info_query"
 
 
 def test_another_person_is_not_misread_as_replacement_request():
@@ -2824,3 +2830,28 @@ def test_negated_refund_does_not_start_compensation_flow():
     assert first["_debug"]["issue_type"] == "delay"
     assert second["_debug"]["requested_resolution"] == "none"
     assert second["action"] == "info"
+
+
+def test_spill_scope_correction_keeps_spill_case():
+    session_id = "test:spill-scope-correction"
+    clear_session(session_id)
+
+    first = _run_turn(session_id, "Roohafza Sharbat leaked all over the bag", order_value=756)
+    second = _run_turn(session_id, "pasta box bhi wet ho gaya, don't call this taste issue", order_value=756)
+    third = _run_turn(session_id, "Mark this as spill, not quality", order_value=756)
+
+    assert first["_debug"]["issue_type"] == "spill_leak"
+    assert second["_debug"]["issue_type"] == "spill_leak"
+    assert third["_debug"]["issue_type"] == "spill_leak"
+
+
+def test_replacement_confirmation_pressure_escalates_instead_of_looping():
+    session_id = "test:replacement-pressure-breaks-loop"
+    clear_session(session_id)
+
+    first = _run_turn(session_id, "Classic Maggi soggy thi, fresh replacement bhejo abhi", order_value=168)
+    second = _run_turn(session_id, "I need a senior person to look at this if you cannot solve it.", order_value=168)
+
+    assert first["action"] in {"info", "replacement", "escalate"}
+    assert second["action"] == "escalate"
+    assert "fresh Classic Maggi sent out" not in second["message"]

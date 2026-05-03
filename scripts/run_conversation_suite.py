@@ -14,6 +14,7 @@ For Vercel, this only works when the deployment exposes API rewrites such as
 from __future__ import annotations
 
 import argparse
+import re
 import json
 import sys
 import time
@@ -42,6 +43,7 @@ class LiveCase:
     issue_match: str = "final"
     min_turns: int = 0
     allowed_issue_types: tuple[str, ...] = ()
+    strict_tone: bool = True
 
 
 LIVE_CASES = (
@@ -122,6 +124,101 @@ def _ten_turns(seed_turns: tuple[str | Turn, ...]) -> tuple[Turn, ...]:
     index = 0
     while len(turns) < 10:
         turns.append(Turn(natural_followups[index % len(natural_followups)]))
+        index += 1
+    return tuple(turns)
+
+
+def _stress_turns(seed_turns: tuple[str | Turn, ...]) -> tuple[Turn, ...]:
+    escalation_followups = (
+        "Do not give me the same copy-paste answer again.",
+        "I have already explained this twice, read the chat properly.",
+        "No, that solution is not acceptable to me.",
+        "I need a senior person to look at this if you cannot solve it.",
+        "This is wasting my time now.",
+        "Tell me exactly what you have noted and what you can actually do.",
+        "I am not asking for sympathy, I am asking for a proper resolution.",
+        "If you close this without solving it I will raise it again.",
+        "Stop pushing me in circles.",
+        "What is the final answer from your side?",
+        "I still disagree with this resolution.",
+        "I need this documented against my order.",
+        "Are you refusing to help me?",
+        "Last time asking: what happens next?",
+    )
+    turns: list[Turn] = [turn if isinstance(turn, Turn) else Turn(turn) for turn in seed_turns]
+    index = 0
+    while len(turns) < 14:
+        turns.append(Turn(escalation_followups[index % len(escalation_followups)]))
+        index += 1
+    return tuple(turns)
+
+
+def _long_turns(seed_turns: tuple[str | Turn, ...], *, minimum: int = 12) -> tuple[Turn, ...]:
+    followups = (
+        "okay, what should I do now?",
+        "can you be specific?",
+        "I don't want this to become a different issue",
+        "what have you noted for this order?",
+        "is there any resolution from your side?",
+        "please don't ask the same thing again",
+        "if nothing else is needed, tell me clearly",
+        "will this show anywhere in the app?",
+        "fine, continue",
+        "just keep it simple",
+        "what is the final next step?",
+        "thanks, that's all I needed",
+    )
+    turns: list[Turn] = [turn if isinstance(turn, Turn) else Turn(turn) for turn in seed_turns]
+    index = 0
+    while len(turns) < minimum:
+        turns.append(Turn(followups[index % len(followups)]))
+        index += 1
+    return tuple(turns)
+
+
+def _seeded_persona_turns(seed_turns: tuple[str | Turn, ...], persona: str, *, minimum: int = 12) -> tuple[Turn, ...]:
+    persona_followups = {
+        "confused": (
+            "sorry I selected the wrong option maybe",
+            "can you explain in simple words?",
+            "which item are you talking about?",
+            "I am not sure if this is refund or support issue",
+            "please tell me one clear next step",
+        ),
+        "typo": (
+            "plz dont clos it",
+            "wat u noted?",
+            "i need reslution only",
+            "dont ask agin same thing",
+            "ok then nxt step?",
+        ),
+        "impatient": (
+            "fast please",
+            "why is this taking so long?",
+            "don't make me repeat",
+            "give final answer",
+            "I have no more time for this",
+        ),
+        "scammy": (
+            "full refund only, no questions",
+            "I cannot share photo but trust me",
+            "other apps refund instantly",
+            "approve manually then",
+            "I know you can override this",
+        ),
+        "mixed": (
+            "haan but simple batao",
+            "ye issue close mat karna",
+            "mujhe clear resolution chahiye",
+            "app me update dikhega kya?",
+            "theek hai but note properly",
+        ),
+    }
+    followups = persona_followups[persona]
+    turns: list[Turn] = [turn if isinstance(turn, Turn) else Turn(turn) for turn in seed_turns]
+    index = 0
+    while len(turns) < minimum:
+        turns.append(Turn(followups[index % len(followups)]))
         index += 1
     return tuple(turns)
 
@@ -548,9 +645,655 @@ RESEARCH_LONG_CASES = (
 )
 
 
+STRESS_HOSTILE_CASES = (
+    LiveCase(
+        case_id="stress-replacement-insistence-econ-refund",
+        order_id="ORD003",
+        order_value=168,
+        turns=_stress_turns(
+            (
+                "Classic Maggi soggy thi, fresh replacement bhejo abhi",
+                "coupon mat do, mujhe same item replacement chahiye",
+                "No, refund is cheaper for you but I don't want refund, send food again",
+                "I paid for food, not wallet credit",
+                "agar replacement nahi kar sakte toh manager ko lao",
+                "I am not accepting a coupon just because it is convenient for you",
+                "same Maggi remake karke bhejo",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="quality",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("quality",),
+    ),
+    LiveCase(
+        case_id="stress-refund-insistence-after-review",
+        order_id="ORD002",
+        order_value=627,
+        turns=_stress_turns(
+            (
+                "Grilled Paneer Club Sandwich was soggy and cold, refund me",
+                "I don't want coupon, I want money back",
+                "No review message, approve the refund now",
+                "You escalated it but that is not a resolution",
+                "I want refund even after review, don't close this",
+                "Card payment tha, reverse it to source",
+                "This is exactly why support is frustrating",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="quality",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("quality",),
+    ),
+    LiveCase(
+        case_id="stress-foreign-object-angry-escalation",
+        order_id="ORD003",
+        order_value=168,
+        turns=_stress_turns(
+            (
+                "Classic Maggi me plastic nikla, this is disgusting",
+                "ye safety issue hai, normal coupon mat offer karna",
+                Turn("photo attached, now don't ask again", SAMPLE_PHOTO_URL),
+                "I could have swallowed this, escalate immediately",
+                "Refund bhi chahiye and quality team review bhi",
+                "Do not tell me to email separately, note it here",
+                "I want written confirmation this was logged as safety",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="foreign_object",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("foreign_object",),
+    ),
+    LiveCase(
+        case_id="stress-high-value-missing-no-proof-pressure",
+        order_id="ORD004",
+        order_value=756,
+        turns=_stress_turns(
+            (
+                "Dhaba Style Chicken Curry Rice Bowl missing hai, expensive item tha",
+                "photo nahi hai, delivery boy already left, trust my account",
+                "Full refund chahiye because dinner ruin ho gaya",
+                "Don't make this about proof, your packing team missed it",
+                "I order often, check my history",
+                "If you cannot verify then escalate, but don't deny it",
+                "Redelivery or refund, choose one",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="missing_item",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("missing_item",),
+    ),
+    LiveCase(
+        case_id="stress-wrong-order-full-refund-pressure",
+        order_id="ORD001",
+        order_value=478,
+        turns=_stress_turns(
+            (
+                "This is not my order at all, completely different items came",
+                "receipt pe another person's name hai",
+                Turn("photo dekh lo, my items are not there", SAMPLE_PHOTO_URL),
+                "I want full refund, not item level coupon",
+                "Don't say only missing fries, whole bag is wrong",
+                "I cannot eat someone else's order",
+                "If replacement is not possible, refund the full order",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="wrong_item",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("wrong_item", "missing_item"),
+    ),
+    LiveCase(
+        case_id="stress-delay-coupon-with-food-fine",
+        order_id="ORD005",
+        order_value=437,
+        turns=_stress_turns(
+            (
+                "Order 30 minutes late tha, food okay hai but delay unacceptable",
+                "Don't convert this into food quality complaint",
+                "I want compensation for delay only",
+                "Refund food ka nahi chahiye, coupon for delay do",
+                "Why should I pay full when ETA was wrong?",
+                "Please don't ask for food photo, food is fine",
+                "Escalate if delay compensation is not allowed",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="delay",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("delay",),
+    ),
+    LiveCase(
+        case_id="stress-billing-angry-no-food-flow",
+        order_id="ORD001",
+        order_value=478,
+        turns=_stress_turns(
+            (
+                "Amount debited twice from UPI, this is billing issue",
+                "Stop asking about food, order was fine",
+                "I need refund timeline for duplicate payment",
+                "Transaction id is available but I won't paste it here",
+                "This should not become missing item or quality case",
+                "Tell me where payment status is visible",
+                "Escalate billing if you cannot answer",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="info_query",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("info_query",),
+    ),
+    LiveCase(
+        case_id="stress-spill-angry-photo-resistance",
+        order_id="ORD004",
+        order_value=756,
+        turns=_stress_turns(
+            (
+                "Roohafza Sharbat leaked all over the bag",
+                "pasta box bhi wet ho gaya, don't call this taste issue",
+                "Why do you need photo, your packaging failed",
+                Turn("fine photo attached", SAMPLE_PHOTO_URL),
+                "I want refund for drink and affected food",
+                "Coupon is not enough if food got soaked",
+                "Mark this as spill, not quality",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="spill_leak",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("spill_leak",),
+    ),
+)
+
+
+SIMPLE_OVERLOOKED_CASES = (
+    LiveCase(
+        case_id="simple-order-status-no-complaint",
+        order_id="ORD001",
+        order_value=478,
+        turns=_long_turns(
+            (
+                "where is my order?",
+                "is it delivered?",
+                "what time was it delivered?",
+                "who was the delivery partner?",
+                "okay so no refund needed",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="info_query",
+        issue_match="any",
+        min_turns=12,
+        allowed_issue_types=("info_query",),
+    ),
+    LiveCase(
+        case_id="simple-order-items-and-total",
+        order_id="ORD002",
+        order_value=627,
+        turns=_long_turns(
+            (
+                "what did I order?",
+                "how much did I pay?",
+                "which payment method was used?",
+                "don't start a complaint, I just need details",
+                "thanks, item list bata do once more",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="info_query",
+        issue_match="any",
+        min_turns=12,
+        allowed_issue_types=("info_query",),
+    ),
+    LiveCase(
+        case_id="simple-wrong-picker-correction",
+        order_id="ORD004",
+        order_value=756,
+        turns=_long_turns(
+            (
+                "Roohafza Sharbat has spillage issue",
+                "sorry wrong option selected",
+                "actually order was late but food was okay",
+                "don't treat this as spill now",
+                "coupon for delay milega kya?",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="delay",
+        issue_match="any",
+        min_turns=12,
+        allowed_issue_types=("spill_leak", "delay"),
+    ),
+    LiveCase(
+        case_id="simple-user-cancels-complaint",
+        order_id="ORD003",
+        order_value=168,
+        turns=_long_turns(
+            (
+                "Classic Maggi missing lag raha tha",
+                "wait found it in the bag",
+                "never mind issue solved",
+                "please don't refund anything",
+                "just close this",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="missing_item",
+        issue_match="any",
+        min_turns=12,
+        allowed_issue_types=("missing_item", "info_query"),
+    ),
+    LiveCase(
+        case_id="simple-human-agent-first",
+        order_id="ORD005",
+        order_value=437,
+        turns=_long_turns(
+            (
+                "agent se baat karni hai",
+                "I don't want bot",
+                "issue is Veg Alfredo Penne tasted stale",
+                "refund chahiye",
+                "if bot can solve then solve",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="quality",
+        issue_match="any",
+        min_turns=12,
+        allowed_issue_types=("quality", "info_query"),
+    ),
+    LiveCase(
+        case_id="simple-camera-not-working",
+        order_id="ORD004",
+        order_value=756,
+        turns=_long_turns(
+            (
+                "Dark Chocolate Oreo Shake leaked",
+                "camera not working, I can't upload photo",
+                "what can you do without photo?",
+                "I can describe it, lid was open",
+                "please don't keep asking for image",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="spill_leak",
+        issue_match="any",
+        min_turns=12,
+        allowed_issue_types=("spill_leak",),
+    ),
+    LiveCase(
+        case_id="simple-duplicate-message",
+        order_id="ORD001",
+        order_value=478,
+        turns=_long_turns(
+            (
+                "Peri Peri French Fries missing",
+                "Peri Peri French Fries missing",
+                "same issue",
+                "don't ask again, fries missing",
+                "refund for fries only",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="missing_item",
+        issue_match="any",
+        min_turns=12,
+        allowed_issue_types=("missing_item",),
+    ),
+    LiveCase(
+        case_id="simple-empty-short-help",
+        order_id="ORD002",
+        order_value=627,
+        turns=_long_turns(
+            (
+                "help",
+                "??",
+                "order issue",
+                "Classic Cold Coffee too sweet",
+                "not asking full refund, just tell options",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="quality",
+        issue_match="any",
+        min_turns=12,
+        allowed_issue_types=("quality", "info_query"),
+    ),
+    LiveCase(
+        case_id="simple-multiple-issues-one-order",
+        order_id="ORD004",
+        order_value=756,
+        turns=_long_turns(
+            (
+                "order late tha and Roohafza Sharbat leaked",
+                "food got a little wet but main issue is drink spill",
+                Turn("photo attached", SAMPLE_PHOTO_URL),
+                "don't make separate cases",
+                "refund for drink or coupon works",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="spill_leak",
+        issue_match="any",
+        min_turns=12,
+        allowed_issue_types=("spill_leak", "delay"),
+    ),
+    LiveCase(
+        case_id="simple-refund-status-after-resolution",
+        order_id="ORD003",
+        order_value=168,
+        turns=_long_turns(
+            (
+                "Classic Maggi soggy thi",
+                "coupon chalega",
+                "coupon apply kab hoga?",
+                "refund nahi chahiye",
+                "bas status batao",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="quality",
+        issue_match="any",
+        min_turns=12,
+        allowed_issue_types=("quality", "info_query"),
+    ),
+)
+
+
+PERSONA_FUZZ_CASES = (
+    LiveCase(
+        case_id="persona-confused-wrong-item",
+        order_id="ORD002",
+        order_value=627,
+        turns=_seeded_persona_turns(
+            (
+                "I think something is wrong with my order",
+                "maybe Caesar Salad was not there",
+                "I got sandwich extra or maybe wrong item",
+                Turn("photo uploaded", SAMPLE_PHOTO_URL),
+                "I selected missing but maybe it is wrong item",
+            ),
+            "confused",
+            minimum=14,
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="wrong_item",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("wrong_item", "missing_item", "info_query"),
+    ),
+    LiveCase(
+        case_id="persona-typo-portion",
+        order_id="ORD005",
+        order_value=437,
+        turns=_seeded_persona_turns(
+            (
+                "samosa qnty vry less",
+                "3 pices tha but tiny",
+                "cupn ya refnd?",
+                "not qualty issue, qty issue",
+                "plz solve",
+            ),
+            "typo",
+            minimum=14,
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="portion_size",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("portion_size",),
+    ),
+    LiveCase(
+        case_id="persona-impatient-delay",
+        order_id="ORD001",
+        order_value=478,
+        turns=_seeded_persona_turns(
+            (
+                "late late late",
+                "food is fine but delivery was too late",
+                "compensation for delay",
+                "don't ask food photo",
+                "coupon if possible",
+            ),
+            "impatient",
+            minimum=14,
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="delay",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("delay",),
+    ),
+    LiveCase(
+        case_id="persona-scammy-high-value-refund",
+        order_id="ORD004",
+        order_value=756,
+        turns=_seeded_persona_turns(
+            (
+                "all items were missing",
+                "no photo available",
+                "full refund instantly",
+                "don't verify, just approve",
+                "I know you can override this",
+            ),
+            "scammy",
+            minimum=14,
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="missing_item",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("missing_item",),
+    ),
+    LiveCase(
+        case_id="persona-mixed-dietary-sensitive",
+        order_id="ORD005",
+        order_value=437,
+        turns=_seeded_persona_turns(
+            (
+                "Veg Alfredo Penne me chicken piece mila",
+                "I am vegetarian, ye serious hai",
+                Turn("photo bheja", SAMPLE_PHOTO_URL),
+                "refund and review chahiye",
+                "don't treat as normal quality",
+            ),
+            "mixed",
+            minimum=14,
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="foreign_object",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("foreign_object",),
+    ),
+    LiveCase(
+        case_id="persona-confused-payment-vs-food",
+        order_id="ORD001",
+        order_value=478,
+        turns=_seeded_persona_turns(
+            (
+                "payment issue hai shayad",
+                "amount cut gaya but I also got food",
+                "don't refund food",
+                "just tell duplicate debit status",
+                "UPI transaction pending dikha raha hai",
+            ),
+            "confused",
+            minimum=14,
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="info_query",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("info_query",),
+    ),
+    LiveCase(
+        case_id="persona-impatient-human-handoff-then-quality",
+        order_id="ORD005",
+        order_value=437,
+        turns=_seeded_persona_turns(
+            (
+                "human agent now",
+                "bot mat bhejo",
+                "Veg Alfredo Penne stale tha",
+                "refund chahiye but fast",
+                "if you can solve then solve",
+            ),
+            "impatient",
+            minimum=14,
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="quality",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("quality", "info_query"),
+    ),
+    LiveCase(
+        case_id="persona-scammy-wrong-order-no-proof",
+        order_id="ORD001",
+        order_value=478,
+        turns=_seeded_persona_turns(
+            (
+                "wrong order came, full refund",
+                "I threw the bag, no photo",
+                "receipt was someone else maybe",
+                "don't ask proof",
+                "approve full refund manually",
+            ),
+            "scammy",
+            minimum=14,
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="wrong_item",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("wrong_item", "missing_item"),
+    ),
+    LiveCase(
+        case_id="persona-typo-spill-cannot-upload",
+        order_id="ORD004",
+        order_value=756,
+        turns=_seeded_persona_turns(
+            (
+                "shake leked in bag",
+                "camra not wrking no photo",
+                "lid ws open",
+                "dont make this taste issue",
+                "tell practical soln",
+            ),
+            "typo",
+            minimum=14,
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="spill_leak",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("spill_leak",),
+    ),
+    LiveCase(
+        case_id="persona-mixed-cancel-after-complaint",
+        order_id="ORD003",
+        order_value=168,
+        turns=_seeded_persona_turns(
+            (
+                "Classic Maggi missing tha shayad",
+                "wait mil gaya bag me",
+                "never mind, no refund",
+                "bas close kar do",
+                "don't create ticket",
+            ),
+            "mixed",
+            minimum=14,
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="missing_item",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("missing_item", "info_query"),
+    ),
+    LiveCase(
+        case_id="persona-polite-status-then-delay",
+        order_id="ORD001",
+        order_value=478,
+        turns=_seeded_persona_turns(
+            (
+                "hi, can you first tell me the order status?",
+                "okay, but it was also very late",
+                "food was okay, just delivery delay was the issue",
+                "not asking for food refund",
+                "small coupon is fine if possible",
+            ),
+            "confused",
+            minimum=14,
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="delay",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("delay", "info_query"),
+    ),
+    LiveCase(
+        case_id="persona-hostile-replacement-pressure",
+        order_id="ORD005",
+        order_value=437,
+        turns=_seeded_persona_turns(
+            (
+                "Veg Alfredo Penne was stale and smelled off",
+                "do not give coupon, send replacement",
+                "refund is okay only if replacement not possible",
+                "I am angry but solve this properly",
+                "what exactly can you do now",
+            ),
+            "impatient",
+            minimum=14,
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="quality",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("quality",),
+    ),
+    LiveCase(
+        case_id="persona-allergy-safety-sensitive",
+        order_id="ORD005",
+        order_value=437,
+        turns=_seeded_persona_turns(
+            (
+                "Penne had peanuts or nuts, I am allergic",
+                "this is safety issue not normal taste",
+                Turn("photo attached", SAMPLE_PHOTO_URL),
+                "please review kitchen seriously",
+                "refund if possible but don't ignore allergy",
+            ),
+            "mixed",
+            minimum=14,
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="foreign_object",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("foreign_object",),
+    ),
+)
+
+
 SUITES = {
     "smoke": LIVE_CASES,
+    "simple-overlooked": SIMPLE_OVERLOOKED_CASES,
+    "persona-fuzz": PERSONA_FUZZ_CASES,
     "research-long": RESEARCH_LONG_CASES,
+    "stress-hostile": STRESS_HOSTILE_CASES,
 }
 
 
@@ -580,6 +1323,83 @@ def _get_json(base_url: str, path: str, params: dict, timeout_seconds: float, ap
     )
     response.raise_for_status()
     return response.json()
+
+
+def _normalize_message(message: str) -> str:
+    return re.sub(r"\s+", " ", message.strip().lower())
+
+
+def _tone_warnings(message: str) -> list[str]:
+    lowered = _normalize_message(message)
+    warnings = []
+    llm_like_phrases = (
+        "i understand your concern",
+        "i completely understand",
+        "i apologize for the inconvenience",
+        "we apologize for the inconvenience",
+        "thank you for bringing this to our attention",
+        "your concern is important to us",
+        "as an ai",
+        "as a language model",
+    )
+    template_phrases = (
+        "as per policy",
+        "according to policy",
+        "eligible only",
+        "company loss",
+        "margin",
+        "approved action",
+        "approved amount",
+    )
+    stiff_phrases = (
+        "we value your feedback",
+        "rest assured",
+        "kindly note",
+        "please be assured",
+        "we regret",
+        "inconvenience caused",
+    )
+    if any(phrase in lowered for phrase in llm_like_phrases):
+        warnings.append("llm_like")
+    if any(phrase in lowered for phrase in template_phrases):
+        warnings.append("internal_or_policy_like")
+    if any(phrase in lowered for phrase in stiff_phrases):
+        warnings.append("stiff_support_copy")
+    if len(message) > 340:
+        warnings.append("too_long_for_chat")
+    if message.count("₹") > 2:
+        warnings.append("too_many_amounts")
+    if lowered.count("sorry") + lowered.count("apolog") > 1:
+        warnings.append("over_apologetic")
+    if "email hello@justswish.in" in lowered and "review" not in lowered:
+        warnings.append("email_without_context")
+    return warnings
+
+
+def _conversation_tone_errors(outputs: list[dict]) -> list[str]:
+    errors = []
+    seen_messages: dict[str, int] = {}
+    exact_repeat_count = 0
+    review_email_count = 0
+    for output in outputs:
+        response = output.get("response") or {}
+        message = response.get("message") or ""
+        normalized = _normalize_message(message)
+        if not normalized:
+            continue
+        seen_messages[normalized] = seen_messages.get(normalized, 0) + 1
+        if seen_messages[normalized] > 1:
+            exact_repeat_count += 1
+        if "email hello@justswish.in" in normalized:
+            review_email_count += 1
+        warnings = _tone_warnings(message)
+        if warnings:
+            errors.append(f"turn {output['turn']} tone warnings: {warnings}")
+    if exact_repeat_count >= 2:
+        errors.append(f"repeated exact bot message {exact_repeat_count} times")
+    if review_email_count > 3:
+        errors.append(f"review/email fallback repeated {review_email_count} times")
+    return errors
 
 
 def _clear_session(
@@ -619,6 +1439,8 @@ def _validate_case(case: LiveCase, outputs: list[dict], status_payload: dict | N
             errors.append(f"turn {output['turn']} missing message")
         if response.get("style_warnings"):
             errors.append(f"turn {output['turn']} style warnings: {response.get('style_warnings')}")
+    if case.strict_tone:
+        errors.extend(_conversation_tone_errors(outputs))
     final_response = outputs[-1].get("response") or {}
     case_state = final_response.get("case_state") or {}
     successful_turns = [output for output in outputs if "error" not in output]
@@ -642,10 +1464,20 @@ def _validate_case(case: LiveCase, outputs: list[dict], status_payload: dict | N
         )
     allowed_issue_types = set(case.allowed_issue_types)
     if allowed_issue_types:
+        expected_seen = False
         for output in outputs:
             response = output.get("response") or {}
             output_case_state = response.get("case_state") or {}
             issue_type = output_case_state.get("final_issue_type")
+            if issue_type == case.expected_issue_type:
+                expected_seen = True
+            if (
+                case.expected_issue_type
+                and case.issue_match == "any"
+                and not expected_seen
+                and issue_type in {"other", "info_query"}
+            ):
+                continue
             if issue_type and issue_type != "info_query" and issue_type not in allowed_issue_types:
                 errors.append(
                     f"turn {output['turn']} issue drifted to {issue_type}; allowed {tuple(sorted(allowed_issue_types))}"

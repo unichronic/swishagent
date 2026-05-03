@@ -287,7 +287,9 @@ def _humanize_message(
             trace_metadata={"component": "humanize", "approved_action": resolution.get("action")},
         ).strip()
         parsed = _extract_json_object(rewritten)
-        candidate = parsed.get("message") if parsed else rewritten
+        if not parsed:
+            return resolution
+        candidate = parsed.get("message")
         if candidate:
             if _humanizer_added_new_claims(candidate, original):
                 return resolution
@@ -311,8 +313,12 @@ def _humanizer_added_new_claims(candidate: str, original: str) -> bool:
         "approved action",
         "approved amount",
         "wallet",
+        "free",
     ]
     if any(pattern in candidate_lower and pattern not in original_lower for pattern in forbidden_patterns):
+        return True
+    resolution_terms = ["refund", "remake", "replacement", "replace", "fresh", "send it", "send a new"]
+    if any(term in candidate_lower and term not in original_lower for term in resolution_terms):
         return True
     if ("₹" in candidate or "%" in candidate_lower or "coupon" in candidate_lower or "credit" in candidate_lower) and not (
         "₹" in original or "%" in original_lower or "coupon" in original_lower or "credit" in original_lower
