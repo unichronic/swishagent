@@ -139,4 +139,14 @@ def is_temperature_signal(text: str) -> bool:
 
 def is_delay_signal(text: str) -> bool:
     text = lower(text)
-    return any(word in text for word in ["late", "delay", "delayed", "where is my order"]) or bool(re.search(r"\beta\b", text))
+    if "where is my order" in text:
+        return True
+    if re.search(r"\b(?:late|delay|delayed)\b", text):
+        return True
+    if re.search(r"\beta\b", text):
+        return True
+    return bool(
+        re.search(r"\b(?:took|taken|taking|aaya|aya|arrived|delivered)\s+(?:after\s+)?\d{2,3}\s*(?:min|mins|minute|minutes)\b", text)
+        or re.search(r"\b\d{2,3}\s*(?:min|mins|minute|minutes)\s+(?:late|delay|delayed|delivery)\b", text)
+        or re.search(r"\b10\s*(?:min|mins|minute|minutes)\s+delivery\b", text)
+    )

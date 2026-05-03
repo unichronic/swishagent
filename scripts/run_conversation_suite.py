@@ -1727,19 +1727,19 @@ def run_case(base_url: str, api_prefix: str, turn_delay_seconds: float, timeout_
         started = time.perf_counter()
         try:
             response = None
-            for attempt in range(3):
+            for attempt in range(5):
                 try:
                     response = _post_json(base_url, "/resolve", payload, timeout_seconds, api_prefix)
                     break
                 except requests.HTTPError as exc:
                     status_code = exc.response.status_code if exc.response is not None else None
-                    if status_code != 429 or attempt == 2:
+                    if status_code != 429 or attempt == 4:
                         raise
                     retry_after = exc.response.headers.get("Retry-After") if exc.response is not None else ""
                     try:
                         delay = float(retry_after)
                     except (TypeError, ValueError):
-                        delay = max(turn_delay_seconds, 8.0)
+                        delay = max(turn_delay_seconds, 8.0 * (attempt + 1))
                     time.sleep(delay)
             if response is None:
                 raise RuntimeError("empty response after retry loop")

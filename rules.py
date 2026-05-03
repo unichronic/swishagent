@@ -2298,6 +2298,8 @@ class Rules:
         text = _lower(complaint)
         if Rules._is_payment_or_billing_query(text):
             return "info_query"
+        if Rules._is_app_availability_query(text):
+            return "info_query"
         if Rules._is_non_delivery_signal(text):
             return "missing_item"
         if Rules._detect_info_query(complaint) != "none":
@@ -2335,6 +2337,8 @@ class Rules:
             return current_issue_type
         if Rules._is_payment_or_billing_query(text):
             return "info_query"
+        if Rules._is_app_availability_query(text):
+            return "info_query"
         if Rules._is_non_delivery_signal(text):
             return "missing_item"
         if Rules._looks_like_ingredient_mismatch(text):
@@ -2347,7 +2351,9 @@ class Rules:
             return "spill_leak" if current_issue_type == "spill_leak" else current_issue_type
         if re.search(r"\b(mark|log|note)\s+(?:this|it)?\s*(?:as\s+)?(?:a\s+)?spill", text):
             return "spill_leak"
-        if re.search(r"\b(late|delay|delayed)\b", text):
+        if current_issue_type == "spill_leak" and re.search(r"\b(spill|spilled|spillage|leak|leaked|leaking|packing|packaging)\b", text):
+            return "spill_leak"
+        if issue_signals.is_delay_signal(text):
             return "delay"
         if Rules._is_temperature_signal(text):
             return "temperature"
@@ -3027,6 +3033,29 @@ class Rules:
         if any(term in text for term in payment_terms):
             return True
         return any(term in text for term in order_failure_terms)
+
+    @staticmethod
+    def _is_app_availability_query(text: str) -> bool:
+        if not text:
+            return False
+        availability_terms = [
+            "surge",
+            "kitchen cleaning",
+            "cannot place order",
+            "can't place order",
+            "cant place order",
+            "cannot order",
+            "can't order",
+            "cant order",
+            "not able to order",
+            "unable to order",
+            "app availability",
+            "service unavailable",
+            "restaurant unavailable",
+            "pass balance stuck",
+            "balance stuck",
+        ]
+        return any(term in text for term in availability_terms)
 
     @staticmethod
     def _should_inherit_case_issue_type(

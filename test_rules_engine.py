@@ -3366,6 +3366,42 @@ def test_spill_scope_correction_keeps_spill_case():
     assert third["_debug"]["issue_type"] == "spill_leak"
 
 
+def test_delivery_time_complaint_without_delay_word_stays_delay():
+    session_id = "test:delivery-time-without-delay-word"
+    clear_session(session_id)
+
+    first = _run_turn(session_id, "Your app promises 10 minute delivery but my order took 40 minutes", order_value=168)
+    second = _run_turn(session_id, "Food was okay, I want delivery compensation only", order_value=168)
+
+    assert first["_debug"]["issue_type"] == "delay"
+    assert second["_debug"]["issue_type"] == "delay"
+    assert "fresh item" not in second["message"].lower()
+
+
+def test_app_availability_complaint_does_not_become_food_quality_case():
+    session_id = "test:app-availability-info-query"
+    clear_session(session_id)
+
+    first = _run_turn(session_id, "Every time I open app it says surge or kitchen cleaning")
+    second = _run_turn(session_id, "I cannot even place order, don't ask which food was bad")
+    third = _run_turn(session_id, "I have pass balance stuck because I cannot order")
+
+    assert first["_debug"]["issue_type"] == "info_query"
+    assert second["_debug"]["issue_type"] == "info_query"
+    assert third["_debug"]["issue_type"] == "info_query"
+
+
+def test_spill_confirmation_language_does_not_drift_to_damage():
+    session_id = "test:spill-confirmation-not-damage"
+    clear_session(session_id)
+
+    first = _run_turn(session_id, "Roohafza Sharbat leaked all over the bag", order_value=756)
+    second = _run_turn(session_id, "Confirm this is spill or packing issue, not taste issue", order_value=756)
+
+    assert first["_debug"]["issue_type"] == "spill_leak"
+    assert second["_debug"]["issue_type"] == "spill_leak"
+
+
 def test_replacement_confirmation_pressure_escalates_instead_of_looping():
     session_id = "test:replacement-pressure-breaks-loop"
     clear_session(session_id)
