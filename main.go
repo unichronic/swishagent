@@ -348,6 +348,7 @@ func resolveHandler(c *gin.Context) {
 func clearSessionHandler(c *gin.Context) {
 	userID := c.Query("user_id")
 	orderID := c.Query("order_id")
+	conversationID := c.Query("conversation_id")
 
 	if userID == "" || orderID == "" {
 		c.JSON(400, gin.H{"error": "user_id and order_id required"})
@@ -359,18 +360,19 @@ func clearSessionHandler(c *gin.Context) {
 		agentURL = "http://localhost:8001"
 	}
 
-	resp, err := http.Post(
-		agentURL+"/clear_session?user_id="+userID+"&order_id="+orderID,
-		"application/json",
-		nil,
-	)
+	clearURL := agentURL + "/clear_session?user_id=" + userID + "&order_id=" + orderID
+	if conversationID != "" {
+		clearURL += "&conversation_id=" + conversationID
+	}
+
+	resp, err := http.Post(clearURL, "application/json", nil)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "failed to clear session"})
 		return
 	}
 	defer resp.Body.Close()
 
-	c.JSON(200, gin.H{"status": "cleared", "user_id": userID, "order_id": orderID})
+	c.JSON(200, gin.H{"status": "cleared", "user_id": userID, "order_id": orderID, "conversation_id": conversationID})
 }
 
 func main() {

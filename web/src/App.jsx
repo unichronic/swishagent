@@ -3,6 +3,29 @@ import axios from 'axios'
 import './App.css'
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
+const COMPLAINT_CATEGORIES = [
+  { id: 'missing_item', label: 'Few item(s) are missing in my order', hint: 'Something was left out of the order.' },
+  { id: 'wrong_item', label: 'Item(s) delivered are incorrect or wrong', hint: 'You got the wrong dish or the wrong variant.' },
+  { id: 'quality_issue', label: 'Item(s) quality is poor', hint: 'Dry, stale, undercooked, cold, or not up to standard.' },
+  { id: 'spill_or_damage', label: 'Item(s) has spillage issue', hint: 'Leaking, damaged, crushed, or opened in transit.' },
+  { id: 'portion_issue', label: 'Item(s) portion size is not adequate', hint: 'Quantity feels short for what you ordered.' },
+  { id: 'delivery_issue', label: 'I did not receive this order', hint: 'Order marked delivered or delayed beyond expectation.' },
+  { id: 'billing_or_coupon', label: 'Payment and billing related query', hint: 'Charge, coupon, or billing issue for this order.' },
+  { id: 'safety_issue', label: 'Report a safety incident', hint: 'Contamination, allergic risk, or unsafe handling.' },
+  { id: 'other', label: 'Something else', hint: 'Use chat if the issue does not fit the categories above.' },
+]
+
+const CATEGORY_CHAT_COPY = {
+  missing_item: 'missing items',
+  wrong_item: 'an incorrect item',
+  quality_issue: 'a quality issue',
+  spill_or_damage: 'a spillage issue',
+  portion_issue: 'a portion issue',
+  delivery_issue: 'a delivery issue',
+  billing_or_coupon: 'a billing or coupon issue',
+  safety_issue: 'a safety issue',
+  other: 'this issue',
+}
 
 // Mock orders data with actual menu items
 const MOCK_ORDERS = [
@@ -113,18 +136,22 @@ const MOCK_ORDERS = [
 ]
 
 function App() {
-  const [view, setView] = useState('orders') // 'orders' or 'chat'
+  const [view, setView] = useState('orders') // 'orders', 'intake', or 'chat'
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [selectedOrder, setSelectedOrder] = useState(null)
+  const [selectedCategory, setSelectedCategory] = useState(null)
+  const [selectedItemName, setSelectedItemName] = useState('')
   const [photoFile, setPhotoFile] = useState(null)
   const [awaitingPhoto, setAwaitingPhoto] = useState(false)
+  const [showCaptureOverlay, setShowCaptureOverlay] = useState(false)
   const [recording, setRecording] = useState(false)
   const [recordingProgress, setRecordingProgress] = useState(0)
   const [previewStream, setPreviewStream] = useState(null)
   const previewVideoRef = useRef(null)
   const conversationIdRef = useRef('')
+  const intakeContextPendingRef = useRef(false)
   const lastComplaintRef = useRef('')
   const messagesEndRef = useRef(null)
   const fileInputRef = useRef(null)
@@ -143,24 +170,93 @@ function App() {
     scrollToBottom()
   }, [messages])
 
-  const handleGetHelp = (order) => {
-    const conversationId = `support-${order.id}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
-    conversationIdRef.current = conversationId
-    setSelectedOrder(order)
-    setView('chat')
+  const resetSupportState = () => {
     setAwaitingPhoto(false)
+    setShowCaptureOverlay(false)
     setRecording(false)
     setRecordingProgress(0)
     setPreviewStream(null)
     setPhotoFile(null)
+    setInput('')
     lastComplaintRef.current = ''
+  }
+
+  const buildStructuredComplaint = (userText = '') => {
+    const parts = []
+    if (selectedCategory?.label) {
+      parts.push(selectedCategory.label)
+    }
+    if (selectedItemName) {
+      parts.push(`Affected item is ${selectedItemName}.`)
+    }
+    if (userText.trim()) {
+      parts.push(userText.trim())
+    }
+    return parts.join(' ')
+  }
+
+  const getCategoryStarter = (category, itemName) => {
+    if (!category) return 'Tell me what went wrong.'
+    if (category.id === 'delivery_issue') return 'Tell me what happened with the delivery.'
+    if (category.id === 'billing_or_coupon') return 'Tell me what looks wrong with the payment or coupon.'
+    if (category.id === 'safety_issue') return 'Tell me what made this feel unsafe.'
+    if (category.id === 'missing_item') return `Tell me what seems to be missing from ${itemName || 'the order'}.`
+    if (category.id === 'portion_issue') return `Tell me what felt off about the quantity for ${itemName || 'the item'}.`
+    return `Tell me what happened with ${itemName || 'the item'}.`
+  }
+
+  const getChatIntro = (category, itemName) => {
+    const categoryCopy = CATEGORY_CHAT_COPY[category?.id] || 'this issue'
+    if (!category) {
+      return 'I can help with this order.'
+    }
+    if (category.id === 'delivery_issue' || itemName === 'Entire order') {
+      return `I can help with ${categoryCopy}.`
+    }
+    return `I can help with ${categoryCopy} for ${itemName}.`
+  }
+
+  const openChatWithIntake = (order, category, itemName) => {
+    const conversationId = `support-${order.id}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    conversationIdRef.current = conversationId
+    intakeContextPendingRef.current = true
+    setSelectedOrder(order)
+    setSelectedCategory(category)
+    setSelectedItemName(itemName)
+    setView('chat')
+    resetSupportState()
     // Clear backend session so history doesn't carry over
     axios.post(`${API_BASE}/clear_session?user_id=USER123&order_id=${order.id}&conversation_id=${conversationId}`).catch(() => {})
     setMessages([{
       type: 'bot',
-      text: `Hi! I'm here to help with order #${order.id}. What seems to be the issue?`,
+      text: `${getChatIntro(category, itemName)} ${getCategoryStarter(category, itemName)}`,
+      meta: { category: category.label, item: itemName },
       timestamp: new Date()
     }])
+  }
+
+  const handleGetHelp = (order) => {
+    setSelectedOrder(order)
+    setSelectedCategory(null)
+    setSelectedItemName('')
+    resetSupportState()
+    setMessages([])
+    setView('intake')
+  }
+
+  const handleCategorySelect = (category) => {
+    setSelectedCategory(category)
+    const orderItems = selectedOrder?.orderDetails?.items ?? []
+    if (orderItems.length === 1) {
+      openChatWithIntake(selectedOrder, category, orderItems[0].name)
+      return
+    }
+    setSelectedItemName('')
+  }
+
+  const handleItemSelect = (itemName) => {
+    if (!selectedOrder || !selectedCategory) return
+    openChatWithIntake(selectedOrder, selectedCategory, itemName)
   }
 
   const handleFileSelect = (e) => {
@@ -224,6 +320,7 @@ function App() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
       setPreviewStream(stream)
+      setShowCaptureOverlay(true)
       const recorder = new MediaRecorder(stream)
       const chunks = []
 
@@ -231,6 +328,7 @@ function App() {
       recorder.onstop = async () => {
         stream.getTracks().forEach(t => t.stop())
         setPreviewStream(null)
+        setShowCaptureOverlay(false)
         setRecording(false)
         setRecordingProgress(0)
 
@@ -293,6 +391,16 @@ function App() {
     }
   }
 
+  const handleCancelRecording = () => {
+    if (previewStream) {
+      previewStream.getTracks().forEach((track) => track.stop())
+    }
+    setPreviewStream(null)
+    setShowCaptureOverlay(false)
+    setRecording(false)
+    setRecordingProgress(0)
+  }
+
   const uploadPhoto = async (file) => {
     return `https://placeholder.com/${file.name}`
   }
@@ -308,14 +416,18 @@ function App() {
     setLoading(true)
     try {
       const photoUrl = await uploadPhoto(photo)
+      const complaintPayload = intakeContextPendingRef.current
+        ? buildStructuredComplaint(complaint)
+        : complaint
       const response = await axios.post(`${API_BASE}/resolve`, {
         user_id: 'USER123',
         order_id: order.id,
         conversation_id: conversationIdRef.current,
-        complaint,
+        complaint: complaintPayload,
         photo_url: photoUrl,
         order_value: order.amount
       })
+      intakeContextPendingRef.current = false
       setMessages(prev => [...prev, {
         type: 'bot',
         text: response.data.message,
@@ -343,8 +455,11 @@ function App() {
     }
 
     setMessages(prev => [...prev, userMessage])
-    const complaintText = input || lastComplaintRef.current
-    if (input) lastComplaintRef.current = input
+    const rawComplaintText = input || lastComplaintRef.current
+    const complaintPayload = intakeContextPendingRef.current
+      ? buildStructuredComplaint(rawComplaintText)
+      : rawComplaintText
+    if (rawComplaintText) lastComplaintRef.current = rawComplaintText
     setInput('')
     setLoading(true)
 
@@ -359,10 +474,11 @@ function App() {
         user_id: 'USER123',
         order_id: selectedOrder.id,
         conversation_id: conversationIdRef.current,
-        complaint: complaintText,
+        complaint: complaintPayload,
         photo_url: photoUrl,
         order_value: selectedOrder.amount
       })
+      intakeContextPendingRef.current = false
 
       const botMessage = {
         type: 'bot',
@@ -445,15 +561,95 @@ function App() {
     )
   }
 
+  if (view === 'intake') {
+    const orderItems = selectedOrder?.orderDetails?.items ?? []
+    return (
+      <div className="support-intake-container">
+        <div className="chat-header">
+          <button className="back-btn" onClick={() => setView('orders')}>←</button>
+          <div className="header-title">Help &amp; Support</div>
+        </div>
+
+        <div className="intake-panel">
+          <div className="intake-order-row">
+            <div>
+              <div className="intake-eyebrow">Order</div>
+              <div className="intake-order-id">#{selectedOrder?.id}</div>
+            </div>
+            <div className="intake-order-meta">₹{selectedOrder?.amount}</div>
+          </div>
+
+          {!selectedCategory && (
+            <>
+              <div className="intake-heading">Choose the issue that fits best</div>
+              <div className="category-list">
+                {COMPLAINT_CATEGORIES.map((category) => (
+                  <button
+                    key={category.id}
+                    className="category-card"
+                    onClick={() => handleCategorySelect(category)}
+                  >
+                    <span className="category-text">{category.label}</span>
+                    <span className="category-arrow">›</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+
+          {selectedCategory && (
+            <>
+              <div className="intake-heading">Which item is affected?</div>
+              <div className="intake-selection">
+                <span className="selection-label">Issue</span>
+                <span className="selection-value">{selectedCategory.label}</span>
+                <button className="selection-change" onClick={() => setSelectedCategory(null)}>Change</button>
+              </div>
+
+              <div className="item-list">
+                {orderItems.map((item) => (
+                  <button
+                    key={item.name}
+                    className="item-card"
+                    onClick={() => handleItemSelect(item.name)}
+                  >
+                    <div className="item-card-main">
+                      <span className="item-card-name">{item.name}</span>
+                      <span className="item-card-desc">{item.description}</span>
+                    </div>
+                    <span className="item-card-price">₹{item.price}</span>
+                  </button>
+                ))}
+                {orderItems.length > 1 && (
+                  <button
+                    className="item-card item-card-full"
+                    onClick={() => handleItemSelect('Entire order')}
+                  >
+                    <div className="item-card-main">
+                      <span className="item-card-name">Entire order</span>
+                      <span className="item-card-desc">Use this if the issue is not limited to one item.</span>
+                    </div>
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="chat-container">
       <div className="chat-header">
-        <button className="back-btn" onClick={() => setView('orders')}>←</button>
+        <button className="back-btn" onClick={() => setView('intake')}>←</button>
         <div className="header-title">Help</div>
       </div>
       
       <div className="chat-subheader">
         <span className="order-badge-small">Order #{selectedOrder?.id}</span>
+        {selectedCategory && <span className="context-pill">{selectedCategory.label}</span>}
+        {selectedItemName && <span className="context-pill context-pill-muted">{selectedItemName}</span>}
       </div>
 
       <div className="messages-container">
@@ -522,13 +718,6 @@ function App() {
           </div>
         )}
         <div className="input-wrapper">
-          <button 
-            className="attach-btn"
-            onClick={() => fileInputRef.current?.click()}
-            title="Attach photo"
-          >
-            📎
-          </button>
           <input
             type="file"
             ref={fileInputRef}
@@ -540,7 +729,7 @@ function App() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyPress={handleKeyPress}
-            placeholder="Describe your issue..."
+            placeholder={selectedItemName ? `Tell us what went wrong with ${selectedItemName.toLowerCase()}...` : 'Describe your issue...'}
             rows="1"
           />
           <button 
@@ -552,6 +741,29 @@ function App() {
           </button>
         </div>
       </div>
+
+      {showCaptureOverlay && (
+        <div className="capture-overlay">
+          <video ref={previewVideoRef} autoPlay muted playsInline className="capture-overlay-video" />
+          <div className="capture-overlay-top">
+            <button className="capture-close" onClick={handleCancelRecording}>×</button>
+            <div className="capture-status">
+              <span className="capture-status-dot" />
+              <span>{recording ? 'Recording live capture' : 'Preparing camera'}</span>
+            </div>
+          </div>
+          <div className="capture-overlay-bottom">
+            <div className="capture-progress-shell">
+              <div className="capture-progress-track">
+                <div className="capture-progress-fill" style={{ width: `${recordingProgress * 100}%` }} />
+              </div>
+              <div className="capture-progress-text">
+                {recording ? 'Keep the order in frame for 5 seconds' : 'Starting camera...'}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
