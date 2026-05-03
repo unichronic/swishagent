@@ -109,8 +109,11 @@ def analyze_photo(image_url: str) -> dict:
                 genai_types.Part.from_bytes(data=img_response.content, mime_type=mime_type),
                 (
                     'You are a food-delivery fraud detector. Respond in JSON only: '
-                    '{"valid": true/false, "reason": "brief explanation"}. '
-                    "Mark invalid only for clear signs of editing or AI generation."
+                    '{"valid": true/false, "reason": "brief explanation", '
+                    '"evidence_relevance": "food_visible|receipt_or_packaging|unrelated|unclear", '
+                    '"visible_issue": "spill|damage|wrong_item|missing_context|quality_visible|none|unclear"}. '
+                    "Mark invalid only for clear signs of editing or AI generation. "
+                    "Use evidence_relevance and visible_issue to describe what the image can actually support."
                 ),
             ]
         )
@@ -118,7 +121,10 @@ def analyze_photo(image_url: str) -> dict:
         start, end = text.find("{"), text.rfind("}") + 1
         if start == -1 or end == 0:
             raise ValueError("no JSON in response")
-        return json.loads(text[start:end])
+        parsed = json.loads(text[start:end])
+        parsed.setdefault("evidence_relevance", "unclear")
+        parsed.setdefault("visible_issue", "unclear")
+        return parsed
     except Exception as exc:
         print(f"photo analysis failed: {exc}")
         return {"valid": True, "reason": "analysis unavailable"}

@@ -49,6 +49,8 @@ services:
     ports:
       - "8080:8080"
     env_file: .env
+    environment:
+      - AGENT_SERVICE_URL=http://agent:8001
     depends_on:
       - postgres
       - redis

@@ -32,11 +32,15 @@ web/dist/
 
 # docs (not for commit)
 docs/
+!docs/
+docs/*
+!docs/support-principles.md
 convo
 
 # debug / audit / temp files
 *.md
 !README.md
+!docs/support-principles.md
 
 # parallel go port (wip, not ready)
 parallel-go/

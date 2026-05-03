@@ -4,6 +4,7 @@ import pytest
 
 from order_data import ORDER_DATABASE
 from rules import Rules, clear_session, get_session, mark_photo_provided, session_has_photo
+from support_state import style_warnings
 
 
 VALID_ACTIONS = {"info", "coupon", "credit", "refund", "replacement", "escalate", "live_capture"}
@@ -394,6 +395,7 @@ def test_practical_customer_openers_are_understood(case: OpenerCase):
 
     assert result["action"] in VALID_ACTIONS
     assert result["message"].strip()
+    assert style_warnings(result["message"]) == []
     assert result["_debug"]["issue_type"] == case.issue_type
     assert result["_debug"]["issue_type_source"] == "llm"
     assert "i completely understand" not in result["message"].lower()
@@ -421,6 +423,7 @@ def test_generated_behavioral_conversations_reach_expected_terminal_action(case:
 
     assert result is not None
     assert result["action"] == case.expected_terminal_action
+    assert style_warnings(result["message"]) == []
     for bit in case.expected_message_bits:
         assert bit.lower() in result["message"].lower()
 

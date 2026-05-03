@@ -12,6 +12,7 @@ import (
 	"log"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -35,10 +36,15 @@ type ResolveRequest struct {
 }
 
 type Resolution struct {
-	Action  string  `json:"action"`
-	Amount  float64 `json:"amount"`
-	Message string  `json:"message"`
-	Reason  string  `json:"reason"`
+	Action        string                 `json:"action"`
+	Amount        float64                `json:"amount"`
+	Message       string                 `json:"message"`
+	Reason        string                 `json:"reason"`
+	CaseState     map[string]interface{} `json:"case_state,omitempty"`
+	ActionStatus  map[string]interface{} `json:"action_status,omitempty"`
+	OpsIncident   map[string]interface{} `json:"ops_incident,omitempty"`
+	SupportTicket map[string]interface{} `json:"support_ticket,omitempty"`
+	StyleWarnings []string               `json:"style_warnings,omitempty"`
 }
 
 type AgentRequest struct {
@@ -145,8 +151,15 @@ func callAgent(req AgentRequest, requestID string) Resolution {
 		})
 		return Resolution{
 			Action:  "escalate",
-			Message: "Something went wrong. A manager will follow up shortly.",
+			Message: "Something went wrong while connecting support. I've created a review for this order so you don't have to repeat it.",
 			Reason:  err.Error(),
+			SupportTicket: map[string]interface{}{
+				"ticket_id":    "ticket_" + requestID,
+				"status":       "open",
+				"priority":     "normal",
+				"response_sla": "within 24 hours",
+				"reason":       "agent_request_build_failed",
+			},
 		}
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -165,8 +178,15 @@ func callAgent(req AgentRequest, requestID string) Resolution {
 		})
 		return Resolution{
 			Action:  "escalate",
-			Message: "Something went wrong. A manager will follow up shortly.",
+			Message: "Something went wrong while connecting support. I've created a review for this order so you don't have to repeat it.",
 			Reason:  err.Error(),
+			SupportTicket: map[string]interface{}{
+				"ticket_id":    "ticket_" + requestID,
+				"status":       "open",
+				"priority":     "normal",
+				"response_sla": "within 24 hours",
+				"reason":       "agent_unavailable",
+			},
 		}
 	}
 	defer resp.Body.Close()
@@ -185,6 +205,12 @@ func callAgent(req AgentRequest, requestID string) Resolution {
 func execAction(result Resolution, userID, orderID, requestID string) Resolution {
 	payoutURL := os.Getenv("PAYOUT_API_URL")
 	if payoutURL == "" {
+		if result.ActionStatus == nil {
+			result.ActionStatus = map[string]interface{}{}
+		}
+		result.ActionStatus["status"] = "approved_pending_execution"
+		result.ActionStatus["execution"] = "skipped"
+		result.ActionStatus["reason"] = "payout_api_unconfigured"
 		logJSON("action_execution_skipped", map[string]interface{}{
 			"request_id": requestID,
 			"user_id":    userID,
@@ -212,6 +238,12 @@ func execAction(result Resolution, userID, orderID, requestID string) Resolution
 		})
 		resp, err := http.Post(payoutURL+"/execute", "application/json", bytes.NewBuffer(body))
 		if err != nil {
+			if result.ActionStatus == nil {
+				result.ActionStatus = map[string]interface{}{}
+			}
+			result.ActionStatus["status"] = "execution_failed"
+			result.ActionStatus["execution"] = "failed"
+			result.ActionStatus["error"] = err.Error()
 			logJSON("action_execution_failed", map[string]interface{}{
 				"request_id":  requestID,
 				"user_id":     userID,
@@ -233,7 +265,20 @@ func execAction(result Resolution, userID, orderID, requestID string) Resolution
 		})
 		if resp.StatusCode != 200 {
 			log.Println("payout returned non-200:", resp.StatusCode)
+			if result.ActionStatus == nil {
+				result.ActionStatus = map[string]interface{}{}
+			}
+			result.ActionStatus["status"] = "execution_failed"
+			result.ActionStatus["execution"] = "failed"
+			result.ActionStatus["status_code"] = resp.StatusCode
+			return result
 		}
+		if result.ActionStatus == nil {
+			result.ActionStatus = map[string]interface{}{}
+		}
+		result.ActionStatus["status"] = "executed"
+		result.ActionStatus["execution"] = "completed"
+		result.ActionStatus["status_code"] = resp.StatusCode
 	}
 	return result
 }
@@ -375,6 +420,51 @@ func clearSessionHandler(c *gin.Context) {
 	c.JSON(200, gin.H{"status": "cleared", "user_id": userID, "order_id": orderID, "conversation_id": conversationID})
 }
 
+func caseStatusHandler(c *gin.Context) {
+	userID := c.Query("user_id")
+	orderID := c.Query("order_id")
+	conversationID := c.Query("conversation_id")
+
+	if userID == "" || orderID == "" {
+		c.JSON(400, gin.H{"error": "user_id and order_id required"})
+		return
+	}
+
+	agentURL := os.Getenv("AGENT_SERVICE_URL")
+	if agentURL == "" {
+		agentURL = "http://localhost:8001"
+	}
+
+	values := url.Values{}
+	values.Set("user_id", userID)
+	values.Set("order_id", orderID)
+	if conversationID != "" {
+		values.Set("conversation_id", conversationID)
+	}
+	resp, err := http.Get(agentURL + "/case_status?" + values.Encode())
+	if err != nil {
+		c.JSON(200, gin.H{
+			"status":          "unavailable",
+			"user_id":         userID,
+			"order_id":        orderID,
+			"conversation_id": conversationID,
+			"support_ticket": gin.H{
+				"ticket_id":    "ticket_" + newRequestID(),
+				"status":       "open",
+				"priority":     "normal",
+				"response_sla": "within 24 hours",
+				"reason":       "case_status_unavailable",
+			},
+		})
+		return
+	}
+	defer resp.Body.Close()
+
+	var result map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&result)
+	c.JSON(200, result)
+}
+
 func main() {
 	godotenv.Load()
 	initDB()
@@ -394,6 +484,7 @@ func main() {
 	r.POST("/resolve", resolveHandler)
 	r.POST("/verify-capture", verifyCaptureHandler)
 	r.POST("/clear_session", clearSessionHandler)
+	r.GET("/case_status", caseStatusHandler)
 	r.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok"}) })
 
 	port := os.Getenv("PORT")

@@ -102,8 +102,8 @@ def test_high_value_low_trust_refund_is_forced_toward_replacement():
         responses.append(result)
 
     assert result["action"] == "info"
-    assert "can't lock in a refund" in responses[2]["message"].lower()
-    assert "can't lock in a refund" in responses[3]["message"].lower()
+    assert "can't lock in a cash refund" in responses[2]["message"].lower()
+    assert "can't lock in a cash refund" in responses[3]["message"].lower()
     assert "fresh veg pink sauce pasta" in responses[2]["message"].lower()
 
 
@@ -2600,7 +2600,7 @@ def test_low_confidence_turn_act_does_not_confirm_pending_replacement():
         history.append({"role": "bot", "content": result["message"]})
 
     assert result["action"] == "info"
-    assert "just to be sure" in result["message"].lower() or "want me to go with that" in result["message"].lower()
+    assert "just to be sure" in result["message"].lower() or "want me to go ahead" in result["message"].lower()
 
 
 def test_llm_fault_hint_can_break_unclear_tie_but_not_override_clear_data():

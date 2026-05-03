@@ -16,7 +16,8 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel
 
 from llm_client import call_text
-from rules import Rules, get_session, clear_session, mark_photo_provided, session_has_photo
+from rules import Rules, get_session, clear_session, get_session_state, mark_photo_provided, session_has_photo
+from support_state import attach_artifacts, build_case_state
 from tracing import langfuse_attributes, langfuse_observation, new_request_id, trace_event
 from tools import (
     analyze_photo,
@@ -134,8 +135,11 @@ def _assess_case(
                 "Visual-evidence guidance: usually true for wrong_item, missing_item in multi-item orders, damaged, spill_leak, and foreign_object; usually false for quality, temperature, delay, and portion_size. "
                 "Set issue_confidence, requested_resolution_confidence, turn_act_confidence, and info_query_confidence as numbers from 0 to 1. "
                 "Set fault_hint based on what the evidence most plausibly suggests, but use unclear if the evidence does not support a confident cause. "
-                "Set economic_preference based on what is realistically the lower-cost and lower-risk fix for the business given the complaint, evidence, order value, and remake practicality. "
-                "Prefer refund for hard-to-verify under-portion or low-value cases, prefer replacement for clearly failed or unusable items when evidence is strong, and prefer coupon when the case is weak or the user asked for replacement without enough proof. "
+                "Swish controls the kitchen, dispatch, and delivery leg, so choose the fix that addresses the actual miss without wasting margin. "
+                "Set economic_preference based on the lowest-cost meaningful resolution given the complaint, evidence, order value, item value, and remake practicality. "
+                "Prefer coupon when the case is weak, goodwill can reasonably close the issue, or the user asks for a remake/refund without enough proof. "
+                "Prefer replacement when Swish can realistically remake the affected item and that is more useful to the customer than a cash refund. "
+                "Prefer refund only when the item/order failure is clear, replacement is not the right fix, or the complaint is serious enough that cash back is the fair resolution. "
                 "Set turn_act to describe what the user is doing in this turn: confirming, rejecting, switching what they want, asking status, or asking cause. "
                 "Set recommended_next_step to the most sensible immediate support move, but do not assume you can override policy. Use clarify when the latest user turn is too ambiguous to act on safely. "
                 "Set economic_confidence as a number from 0 to 1. "
@@ -247,9 +251,10 @@ def _humanize_message(
         {
             "role": "system",
             "content": (
-                "Rewrite support messages to sound like a real human support agent in chat. "
+                "Rewrite support messages to sound like a real human support agent in chat, not like a model or a policy script. "
                 "Keep the exact action, item, amount, and outcome unchanged. "
-                "Use a calm objection-handling style: brief acknowledgment, short reason, one practical option, direct close. "
+                "Use a calm objection-handling style: brief acknowledgment, plain reason, one practical option, direct close. "
+                "When the original is negotiating toward a coupon or remake, keep that negotiation gentle and specific. "
                 "Do not add policy, promises, apologies beyond one brief acknowledgment, or new facts. "
                 "Do not repeat or lightly paraphrase the customer's complaint back to them. "
                 "Show you understood it without mirroring their exact wording. "
@@ -257,7 +262,7 @@ def _humanize_message(
                 "Use plain English only. No Hindi or Hinglish. Short, direct, natural. "
                 "Do not start with 'Got it' unless the original already does. "
                 "Do not say 'should help', 'on the way', 'I asked the kitchen', 'I'll pass this to the team', or anything stronger than the original. "
-                "Do not mention internal economics, policy, or company loss. "
+                "Do not mention internal economics, policy, margin, or company loss. "
                 "Do not add product intent or product-sizing claims such as saying an item is meant to be small, snack-sized, standard, or expected. "
                 "Do not invent review steps, quality checks, or customer next actions unless the original already says them. "
                 'Reply in JSON only as {"message":"..."} and keep it to max 2 sentences.'
@@ -374,9 +379,12 @@ def run(req: RunRequest, request: Request):
         _ = _fetch_with_trace(request_id, "delivery", get_delivery_info, req.order_id)
 
         photo_valid = None
+        photo_analysis = {}
         if req.photo_url:
             photo_analysis = _fetch_with_trace(request_id, "photo_analysis", analyze_photo, req.photo_url)
             photo_valid = photo_analysis.get("valid", True)
+            if photo_analysis.get("evidence_relevance") == "unrelated":
+                photo_valid = False
 
         order_value = req.order_value or float(order_details.get("total_amount") or 0.0)
         assessment_started = time.perf_counter()
@@ -431,6 +439,7 @@ def run(req: RunRequest, request: Request):
                 "order_value": order_value,
                 "trust_score": float(trust.get("score", 50)),
                 "photo_valid": photo_valid,
+                "photo_analysis": photo_analysis,
                 "photo_in_session": session_has_photo(session_id),
                 "assessment": assessment,
                 "assessment_status": assessment_meta.get("status"),
@@ -483,7 +492,21 @@ def run(req: RunRequest, request: Request):
             debug_meta.get("recommended_next_step"),
             debug_meta.get("clarification_needed"),
         )
+        case_state = build_case_state(
+            user_id=req.user_id,
+            order_id=req.order_id,
+            session_id=session_id,
+            complaint=req.complaint,
+            order_details=order_details,
+            order_items=order_items,
+            kitchen=kitchen,
+            fleet=fleet,
+            trust=trust,
+            assessment=assessment,
+            resolution_debug=debug_meta,
+        )
         resolution = _humanize_message(resolution, req.complaint, order_items, history)
+        resolution = attach_artifacts(get_session_state(session_id), resolution, case_state)
         if INCLUDE_ASSESSMENT_DEBUG:
             resolution["_assessment"] = {"meta": assessment_meta, "parsed": assessment}
         resolution.pop("_debug", None)
@@ -518,14 +541,21 @@ def run(req: RunRequest, request: Request):
             )
         return resolution
     except Exception as exc:
+        session_id = req.conversation_id or f"support:{req.user_id}:{req.order_id}"
         error_response = {
             "action": "escalate",
             "amount": 0.0,
-            "message": "Something broke on our side, so I can't sort this properly in chat right now. If you'd like to take it further, please email hello@justswish.in and the team can help from there.",
+            "message": "Something broke on our side, so I can't sort this properly in chat right now. I've created a support review for this order so you don't have to explain it again.",
             "reason": str(exc),
+            "support_ticket": {
+                "ticket_id": f"ticket_{request_id}",
+                "status": "open",
+                "priority": "normal",
+                "response_sla": "within 24 hours",
+                "reason": "agent_error",
+            },
         }
         try:
-            session_id = f"support:{req.user_id}:{req.order_id}"
             history = get_session(session_id)
             history.append({"role": "bot", "content": error_response["message"]})
         except Exception:
@@ -555,6 +585,22 @@ def clear_session_endpoint(user_id: str, order_id: str, conversation_id: Optiona
     session_id = conversation_id or f"support:{user_id}:{order_id}"
     clear_session(session_id)
     return {"status": "cleared", "session_id": session_id}
+
+
+@app.get("/case_status")
+def case_status_endpoint(user_id: str, order_id: str, conversation_id: Optional[str] = None):
+    session_id = conversation_id or f"support:{user_id}:{order_id}"
+    state = get_session_state(session_id)
+    return {
+        "status": "ok",
+        "user_id": user_id,
+        "order_id": order_id,
+        "conversation_id": conversation_id,
+        "case_state": state.get("case_state"),
+        "action_lifecycles": state.get("action_lifecycles", []),
+        "ops_incidents": state.get("ops_incidents", []),
+        "support_tickets": state.get("support_tickets", []),
+    }
 
 
 @app.get("/health")

@@ -1249,12 +1249,12 @@ class Rules:
     @staticmethod
     def _replacement_steer_message(item_name: str, hard_block_refund: bool) -> str:
         if hard_block_refund:
-            return f"I can't lock in a refund on this one, but I can sort a fresh {item_name} right away if you'd like."
-        return f"If the coupon doesn't sort it for you, the next clean fix I can do here is a fresh {item_name}."
+            return f"I can't lock in a cash refund on this one, but I can still make this right with a fresh {item_name} if that works for you."
+        return f"If the coupon doesn't feel enough, the cleaner fix I can do here is a fresh {item_name}."
 
     @staticmethod
     def _replacement_confirm_message(item_name: str) -> str:
-        return f"If you'd rather have it remade, I can send a fresh {item_name}. Want me to go with that?"
+        return f"I can get a fresh {item_name} remade for you instead. Want me to go ahead with that?"
 
     @staticmethod
     def _issue_negotiation_frame(issue_type: str, desired_resolution: str, evidence_strength: str) -> str:
@@ -1292,23 +1292,23 @@ class Rules:
         if desired_resolution == "replacement" and evidence_strength != "strong":
             if push_count <= 1:
                 return (
-                    f"I get why you're asking for a fresh {item_name}. From what I can actually verify here, "
-                    f"the clean option I can do right now is a ₹{amount} coupon. Want me to add that?"
+                    f"I get why you're asking for a fresh {item_name}. I don't have enough to approve a remake directly yet, "
+                    f"but I can add a ₹{amount} coupon right now. Want me to do that?"
                 )
             return (
-                f"I don't want to overpromise a remake I can't verify properly from this side. "
-                f"I can still add the ₹{amount} coupon now, otherwise I'll send this across for review."
+                f"I still can't approve the remake cleanly from what I have here. "
+                f"I can add the ₹{amount} coupon now, or move this for review if that doesn't work."
             )
         if desired_resolution == "replacement":
             if push_count <= 1:
                 if tone_guardrail == "sensitive" or negotiation_strength == "light":
                     return (
-                        f"I get why you'd want this remade. The quickest thing I can lock in right now is the ₹{amount} coupon. "
+                        f"I get why you'd want this remade. The quickest thing I can put through right now is the ₹{amount} coupon. "
                         f"If that still doesn't help, I can take you to the next step."
                     )
                 return (
-                    f"I get why you'd want this remade because {frame}. The quickest thing I can lock in right now is the ₹{amount} coupon, "
-                    f"and if that still doesn't help I can move to the next fix with you."
+                    f"I get why you'd want this remade because {frame}. I can put through the ₹{amount} coupon right now, "
+                    f"and if that still doesn't work I can move to the next fix with you."
                 )
             return (
                 f"If the coupon still doesn't work for you, I can move to a fresh {item_name} next. "
@@ -1322,12 +1322,12 @@ class Rules:
                         f"If that doesn't work for you, I'll take it to the next step."
                     )
                 return (
-                    f"I get that you'd rather have cash back here because {frame}. From what I can actually verify on my side, "
-                    f"the fastest fix I can put through right now is the ₹{amount} coupon."
+                    f"I get that you'd rather have cash back here because {frame}. The fastest fix I can put through right now "
+                    f"is the ₹{amount} coupon."
                 )
             return (
                 f"I can still add the ₹{amount} coupon right now. If that doesn't work for you, "
-                f"I'll send the case across for review instead of overpromising the refund."
+                f"I'll move the case for review instead of promising a refund I can't approve here."
             )
         return (
             f"I can put through the ₹{amount} coupon now if that helps. "
@@ -2344,7 +2344,7 @@ class Rules:
         frame = Rules._issue_negotiation_frame(issue_type, desired_resolution, evidence_strength)
         if desired_resolution == "replacement" and evidence_strength != "strong":
             return (
-                f"I want to keep this moving for you, and the clean fix I can do right now is a ₹{amount} coupon. "
+                f"I want to keep this moving for you. Since I can't verify enough for a remake yet, I can add a ₹{amount} coupon right now. "
                 f"Want me to put that through?"
             )
         if desired_resolution == "replacement" and Rules._replacement_negotiation_turn_limit(
@@ -2361,12 +2361,12 @@ class Rules:
                     f"If that still doesn't work for you, we can take the next step."
                 )
             return (
-                f"I can put through a ₹{amount} coupon right away for this, and that's the quickest fix I can lock in immediately while we avoid holding this up any further. "
+                f"I can put through a ₹{amount} coupon right away for this, and that's the quickest fix I can lock in immediately. "
                 f"Want me to add that?"
             )
         if desired_resolution == "replacement":
             if not negotiation_allowed:
-                return f"If you'd rather have it remade, I can send a fresh {item_name}. Want me to go with that?"
+                return f"I can get a fresh {item_name} remade for you instead. Want me to go ahead with that?"
             return (
                 f"I can sort this fastest with a ₹{amount} coupon right away since {frame}. "
                 f"If that still doesn't work for you, we can look at a fresh {item_name}."

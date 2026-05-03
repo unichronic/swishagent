@@ -180,3 +180,100 @@ def test_run_falls_back_to_rules_when_assessment_provider_fails(monkeypatch):
     assert response.status_code == 200
     assert payload["action"] == "info"
     assert payload["reason"] != "assessment_unavailable:error"
+
+
+def test_run_returns_case_state_lifecycle_and_ops_artifacts(monkeypatch):
+    client = TestClient(agent_service.app)
+
+    monkeypatch.setattr(agent_service, "get_order_details", lambda order_id: {"order_id": order_id, "total_amount": 478})
+    monkeypatch.setattr(
+        agent_service,
+        "get_order_items",
+        lambda order_id: {"items": [{"name": "Peri Peri French Fries", "price": 209}]},
+    )
+    monkeypatch.setattr(agent_service, "check_kitchen_log", lambda order_id: {"status": "ready", "quality_out": "fair"})
+    monkeypatch.setattr(agent_service, "check_fleet_status", lambda order_id: {"delay_mins": 4, "traffic_flag": False})
+    monkeypatch.setattr(agent_service, "get_trust_score", lambda user_id: {"score": 92, "total_orders": 18, "refund_requests": 1})
+    monkeypatch.setattr(agent_service, "get_delivery_info", lambda order_id: {"status": "delivered"})
+    monkeypatch.setattr(
+        agent_service,
+        "_assess_case",
+        lambda **kwargs: (
+            {"issue_type": "quality", "issue_confidence": 0.9, "active_item_name": "Peri Peri French Fries"},
+            {"status": "ok", "raw_preview": "{}"},
+        ),
+    )
+    monkeypatch.setattr(agent_service, "_humanize_message", lambda resolution, complaint, order_items, history: resolution)
+
+    def fake_resolve(**kwargs):
+        return {
+            "action": "replacement",
+            "amount": 0,
+            "message": "I've approved a fresh Peri Peri French Fries replacement.",
+            "reason": "Replacement approved after confirmation",
+            "_debug": {
+                "issue_type": "quality",
+                "issue_severity": "medium",
+                "evidence_strength": "weak",
+                "requested_resolution": "replacement",
+                "active_item_name": "Peri Peri French Fries",
+                "fault": "kitchen",
+            },
+        }
+
+    monkeypatch.setattr(agent_service.Rules, "resolve", staticmethod(fake_resolve))
+
+    response = client.post(
+        "/run",
+        json={
+            "user_id": "USER123",
+            "order_id": "ORD001",
+            "conversation_id": "test:artifacts",
+            "complaint": "fries were soggy and i want replacement",
+            "order_value": 478,
+        },
+    )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["case_state"]["selected_item"] == "Peri Peri French Fries"
+    assert payload["case_state"]["risk_tier"] == "low"
+    assert payload["action_status"]["action"] == "replacement"
+    assert payload["action_status"]["status"] == "approved_pending_execution"
+    assert payload["ops_incident"]["owner_area"] == "kitchen"
+
+    status_response = client.get(
+        "/case_status",
+        params={
+            "user_id": "USER123",
+            "order_id": "ORD001",
+            "conversation_id": "test:artifacts",
+        },
+    )
+    status_payload = status_response.json()
+    assert status_payload["case_state"]["selected_item"] == "Peri Peri French Fries"
+    assert status_payload["action_lifecycles"][0]["action"] == "replacement"
+    assert status_payload["ops_incidents"][0]["owner_area"] == "kitchen"
+
+
+def test_agent_error_creates_support_ticket(monkeypatch):
+    client = TestClient(agent_service.app)
+
+    monkeypatch.setattr(agent_service, "get_order_details", lambda order_id: (_ for _ in ()).throw(RuntimeError("data down")))
+
+    response = client.post(
+        "/run",
+        json={
+            "user_id": "USER123",
+            "order_id": "ORD001",
+            "conversation_id": "test:error-ticket",
+            "complaint": "support is not working",
+            "order_value": 478,
+        },
+    )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["action"] == "escalate"
+    assert payload["support_ticket"]["status"] == "open"
+    assert "explain it again" in payload["message"].lower()
