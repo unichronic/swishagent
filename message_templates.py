@@ -164,12 +164,25 @@ def active_case_status_message(
     return f"I've noted the {issue_label(issue_type)} for {target}. Tell me whether you want a coupon, refund, replacement, or just want this logged."
 
 
-def review_escalation_message(resolution_type: str) -> str:
+def review_escalation_message(
+    resolution_type: str,
+    *,
+    item_name: Optional[str] = None,
+    issue_type: Optional[str] = None,
+) -> str:
+    target = item_name if item_name and item_name != "item" else "this order"
+    label = issue_label(issue_type or "quality")
     if resolution_type == "replacement":
-        return "I can't verify enough on my side to approve a remake directly. If you'd like to take it further, please email hello@justswish.in and the team can review it from there."
+        return (
+            f"I don't have enough verified evidence to approve a remake for {target} from chat. "
+            "I've moved it to review so the team can check the order context."
+        )
     if resolution_type == "refund":
-        return "I can't lock in a cash refund directly from what I can verify here. If you'd like to take it further, please email hello@justswish.in and the team can review it from there."
-    return "I can't close this properly from chat alone. If you'd like to take it further, please email hello@justswish.in and the team can review it from there."
+        return (
+            f"I can't lock in a cash refund for the {label} on {target} from what I can verify here. "
+            "I've moved it to review so a person can check the order context."
+        )
+    return f"I can't close this properly from chat alone for the {label} on {target}, so I've moved it to review with the order context attached."
 
 
 def review_repeat_message() -> str:
@@ -206,9 +219,15 @@ def semantic_confirmation_message(
 
 def photo_message(order_value: float, issue_type: str, item_name: str = "item") -> str:
     if issue_type == "missing_item":
-        return "Can you send a quick photo of what arrived? That helps me verify the missing item fast."
+        return "Please upload a photo of what arrived so I can verify what is missing before deciding the fix."
+    if issue_type == "wrong_item":
+        target = item_name if item_name and item_name != "item" else "item"
+        return f"Please upload a photo showing the {target} you received. I need that proof before deciding compensation in chat."
+    if issue_type in {"spill_leak", "damaged"}:
+        target = item_name if item_name and item_name != "item" else "item"
+        return f"Please upload a photo or short video of the {target} as it arrived, especially the packaging and spill/damage."
     target = item_name if item_name and item_name != "item" else "item"
-    return f"Can you send a quick photo of the {target}? That helps me sort this faster."
+    return f"Please upload a clear photo of the {target}. I need that before taking a compensation action in chat."
 
 
 def replacement_status_message(state: Dict[str, Any]) -> str:

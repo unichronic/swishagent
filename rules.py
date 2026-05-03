@@ -1013,7 +1013,7 @@ class Rules:
             return {
                 "action": "escalate",
                 "amount": 0.0,
-                "message": Rules._review_escalation_message("case"),
+                "message": Rules._review_escalation_message("case", item_name=item_name, issue_type=issue_type),
                 "reason": "High-severity safety complaint requires manual review",
             }
 
@@ -1109,7 +1109,7 @@ class Rules:
                 return {
                     "action": "escalate",
                     "amount": 0.0,
-                    "message": Rules._review_escalation_message(wants),
+                    "message": Rules._review_escalation_message(wants, item_name=item_name, issue_type=issue_type),
                     "reason": "LLM recommendation and policy both point to manual review",
                 }
             if (
@@ -1271,7 +1271,7 @@ class Rules:
             return {
                 "action": "escalate",
                 "amount": 0.0,
-                "message": Rules._review_escalation_message(desired),
+                "message": Rules._review_escalation_message(desired, item_name=item_name, issue_type=issue_type),
                 "reason": "Coupon negotiation stalled under escalation pressure",
             }
 
@@ -1301,7 +1301,7 @@ class Rules:
                     return {
                         "action": "escalate",
                         "amount": 0.0,
-                        "message": Rules._review_escalation_message("replacement"),
+                        "message": Rules._review_escalation_message("replacement", item_name=item_name, issue_type=issue_type),
                         "reason": "Replacement requested without enough evidence after repeated coupon steering",
                     }
                 return {
@@ -1359,7 +1359,7 @@ class Rules:
                 return {
                     "action": "escalate",
                     "amount": 0.0,
-                    "message": Rules._review_escalation_message("refund"),
+                    "message": Rules._review_escalation_message("refund", item_name=item_name, issue_type=issue_type),
                     "reason": "Refund requested after replacement steering but requires review",
                 }
             return {
@@ -1386,7 +1386,7 @@ class Rules:
             return {
                 "action": "escalate",
                 "amount": 0.0,
-                "message": Rules._review_escalation_message("refund"),
+                "message": Rules._review_escalation_message("refund", item_name=item_name, issue_type=issue_type),
                 "reason": "Refund requested but economics and evidence call for manual review",
             }
 
@@ -1420,7 +1420,11 @@ class Rules:
                 return {
                     "action": "escalate",
                     "amount": 0.0,
-                    "message": Rules._review_escalation_message("refund"),
+                    "message": Rules._review_escalation_message(
+                        "refund",
+                        item_name=item_name,
+                        issue_type=issue_type,
+                    ),
                     "reason": "Refund requested but policy requires manual review",
                 }
             case_flow.set_pending_refund_amount(state)
@@ -1483,7 +1487,11 @@ class Rules:
             return {
                 "action": "escalate",
                 "amount": 0.0,
-                "message": Rules._review_escalation_message("refund"),
+                "message": Rules._review_escalation_message(
+                    "refund",
+                    item_name=item_name,
+                    issue_type=state.get("issue_type", "quality"),
+                ),
                 "reason": "Refund requested but policy requires manual review",
             }
 
@@ -1536,7 +1544,11 @@ class Rules:
             return {
                 "action": "escalate",
                 "amount": 0.0,
-                "message": Rules._review_escalation_message("replacement"),
+                "message": Rules._review_escalation_message(
+                    "replacement",
+                    item_name=item_name,
+                    issue_type=state.get("issue_type", "quality"),
+                ),
                 "reason": "User asked to move replacement case for review",
             }
         if (turn_act == "switch_resolution" and refund_requested) or (refund_requested and not hard_block_refund):
@@ -1545,7 +1557,11 @@ class Rules:
                 return {
                     "action": "escalate",
                     "amount": 0.0,
-                    "message": Rules._review_escalation_message("refund"),
+                    "message": Rules._review_escalation_message(
+                        "refund",
+                        item_name=item_name,
+                        issue_type=state.get("issue_type", "quality"),
+                    ),
                     "reason": "Refund request moved to review after supervisor request",
                 }
             if preferred_resolution == "replacement":
@@ -1555,7 +1571,11 @@ class Rules:
                     return {
                         "action": "escalate",
                         "amount": 0.0,
-                        "message": Rules._review_escalation_message("refund"),
+                        "message": Rules._review_escalation_message(
+                            "refund",
+                            item_name=item_name,
+                            issue_type=state.get("issue_type", "quality"),
+                        ),
                         "reason": "Refund requested after replacement steering but requires review",
                     }
                 return {
@@ -1569,7 +1589,11 @@ class Rules:
                 return {
                     "action": "escalate",
                     "amount": 0.0,
-                    "message": Rules._review_escalation_message("refund"),
+                    "message": Rules._review_escalation_message(
+                        "refund",
+                        item_name=item_name,
+                        issue_type=state.get("issue_type", "quality"),
+                    ),
                     "reason": "Refund requested from replacement flow but economics require review",
                 }
             if not Rules._refund_allowed(
@@ -1581,7 +1605,11 @@ class Rules:
                 return {
                     "action": "escalate",
                     "amount": 0.0,
-                    "message": Rules._review_escalation_message("refund"),
+                    "message": Rules._review_escalation_message(
+                        "refund",
+                        item_name=item_name,
+                        issue_type=state.get("issue_type", "quality"),
+                    ),
                     "reason": "Refund requested from replacement flow but policy requires review",
                 }
             case_flow.set_pending_refund_amount(state)
@@ -1608,7 +1636,11 @@ class Rules:
                 return {
                     "action": "escalate",
                     "amount": 0.0,
-                    "message": Rules._review_escalation_message("replacement"),
+                    "message": Rules._review_escalation_message(
+                        "replacement",
+                        item_name=item_name,
+                        issue_type=state.get("issue_type", "quality"),
+                    ),
                     "reason": "Unresolved case moved to review after escalation pressure",
                 }
             return {
@@ -1640,7 +1672,11 @@ class Rules:
             return {
                 "action": "escalate",
                 "amount": 0.0,
-                "message": Rules._review_escalation_message("replacement"),
+                "message": Rules._review_escalation_message(
+                    "replacement",
+                    item_name=item_name,
+                    issue_type=state.get("issue_type", "quality"),
+                ),
                 "reason": "Replacement requested but evidence is not strong enough for auto approval",
             }
 
@@ -1934,8 +1970,17 @@ class Rules:
         return message_templates.issue_label(issue_type)
 
     @staticmethod
-    def _review_escalation_message(resolution_type: str) -> str:
-        return message_templates.review_escalation_message(resolution_type)
+    def _review_escalation_message(
+        resolution_type: str,
+        *,
+        item_name: Optional[str] = None,
+        issue_type: Optional[str] = None,
+    ) -> str:
+        return message_templates.review_escalation_message(
+            resolution_type,
+            item_name=item_name,
+            issue_type=issue_type,
+        )
 
     @staticmethod
     def _review_repeat_message(state: Dict[str, Any], user_text: str, item_name: str = "item") -> str:
@@ -1948,9 +1993,9 @@ class Rules:
             )
         if any(term in text for term in ["refund", "cash", "money", "269", "full"]):
             variants = [
-                "I've added that you still want cash back, not the chat option. I can't approve that automatically here, so the refund review is the next step.",
-                "The refund request is already with review. I can't convert it to an instant cash approval from this chat.",
-                "I have the refund ask captured. Repeating it here won't unlock an automatic payout, but it stays attached to the review.",
+                f"I've added that you still want cash back for {target}, not the chat option. I can't approve that automatically here, so the refund review is the next step.",
+                f"The refund request for {target} is already with review. I can't convert it to an instant cash approval from this chat.",
+                f"I have the refund ask for {target} captured. Repeating it here won't unlock an automatic payout, but it stays attached to the review.",
             ]
             return variants[(max(1, int(state.get("escalation_repeat_count") or 1)) - 1) % len(variants)]
         if any(term in text for term in ["eat", "hungry", "food", "mood", "ruin"]):
@@ -3698,9 +3743,9 @@ class Rules:
             return f"I'm seeing a delivery delay on the {item_name}."
         if issue_type == "wrong_item":
             variants = [
-                "I still have this logged as a wrong-item packing issue.",
-                "The issue I have captured is that the item you received did not match the order.",
-                "This is still being treated as a wrong item, not a delivery-status question.",
+                f"I still have {item_name} logged as a wrong-item packing issue.",
+                f"The issue I have captured is that the {item_name} you received did not match the order.",
+                f"I'm still treating {item_name} as a wrong-item case, not a delivery-status question.",
             ]
             return Rules._rotating_followup_message(state, "wrong_item", variants)
         if issue_type == "missing_item":
@@ -3746,7 +3791,7 @@ class Rules:
             return f"The {item_name} looks okay from the kitchen side, and the delivery leg is the part that looks weaker here."
         if (state or {}).get("vague_quality_text"):
             return f"I've kept this as a quality complaint for the {item_name}, without guessing a cause from the logs."
-        return "The logs still don't point to one clean cause."
+        return f"I've kept this logged for the {item_name}; the order data doesn't give me one clean cause yet."
 
     @staticmethod
     def _info_query_message(
@@ -3895,15 +3940,23 @@ class Rules:
             return f"I can add a ₹{amount} coupon right away here. If that still doesn't land right, I'll take you through the next option."
         if issue_type == "delay":
             return f"I can offer a ₹{amount} coupon for the delay right away if that works for you."
+        if issue_type == "wrong_item":
+            return f"For the wrong item, I can apply a ₹{amount} coupon in chat. If you don't want that, the next step is review."
+        if issue_type in {"spill_leak", "damaged"}:
+            return f"For the spill/damage issue, I can apply a ₹{amount} coupon in chat. If that doesn't cover it, I can move it for review."
+        if issue_type == "missing_item":
+            return f"For the missing item issue, I can apply a ₹{amount} coupon in chat. If that doesn't fit, I can send it for review."
         if issue_type == "portion_size":
             if portion_component:
                 return f"For the {portion_component} quantity concern, I can apply a ₹{amount} coupon in chat. Want me to do that?"
             return f"For the quantity concern, I can apply a ₹{amount} coupon in chat. Want me to do that?"
+        if issue_type == "quality":
+            return f"For the quality issue on {item_name}, I can apply a ₹{amount} coupon in chat. If you want cash back instead, that needs review."
         if issue_type == "foreign_object":
             if tone_guardrail == "sensitive":
                 return f"I can put through a ₹{amount} coupon right away while I keep this moving for you. If that still doesn't feel right, we can take the next step."
             return f"I can put through a ₹{amount} coupon right away while I keep this moving for you. If that doesn't land right, we can go to the next step."
-        return f"I can put through a ₹{amount} coupon right away if that works for you."
+        return f"I can apply a ₹{amount} coupon in chat. Tell me if you want that or want this moved for review."
 
     @staticmethod
     def _store_terminal_state(state: Dict[str, Any]) -> None:

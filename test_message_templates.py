@@ -6,7 +6,7 @@ def test_photo_message_names_missing_item_evidence_context():
         order_value=450,
         issue_type="missing_item",
         item_name="Butter Chicken Rice Bowl",
-    ) == "Can you send a quick photo of what arrived? That helps me verify the missing item fast."
+    ) == "Please upload a photo of what arrived so I can verify what is missing before deciding the fix."
 
 
 def test_photo_message_uses_item_name_for_physical_issue():
@@ -14,7 +14,7 @@ def test_photo_message_uses_item_name_for_physical_issue():
         order_value=450,
         issue_type="spill_leak",
         item_name="Roohafza Sharbat",
-    ) == "Can you send a quick photo of the Roohafza Sharbat? That helps me sort this faster."
+    ) == "Please upload a photo or short video of the Roohafza Sharbat as it arrived, especially the packaging and spill/damage."
 
 
 def test_semantic_confirmation_handles_prep_anomaly_without_wrong_category():
