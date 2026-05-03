@@ -21,6 +21,8 @@ def test_assessment_eval_parses_valid_json(monkeypatch):
         captured["messages"] = messages
         return (
             '{"issue_type":"wrong_item","issue_confidence":0.92,"requested_resolution":"refund",'
+            '"customer_meaning":"customer says they received the wrong item","reasoning_brief":"wrong item is explicitly stated",'
+            '"uncertainty_reason":"","policy_risk_flags":["evidence_needed"],'
             '"requested_resolution_confidence":0.88,"info_query":"none","info_query_confidence":0.9,'
             '"assurance_query":false,"turn_act":"switch_resolution","turn_act_confidence":0.74,'
             '"issue_severity":"medium","active_item_name":"Classic Maggi","selected_item_conflict":false,'
@@ -52,6 +54,9 @@ def test_assessment_eval_parses_valid_json(monkeypatch):
     assert "dietary_severity" in prompt_text
     assert "dietary_direction" in prompt_text
     assert "resolution_change" in prompt_text
+    assert "customer_meaning" in prompt_text
+    assert "reasoning_brief" in prompt_text
+    assert "policy_risk_flags" in prompt_text
 
 
 def test_assessment_eval_marks_invalid_json(monkeypatch):
@@ -160,7 +165,30 @@ def test_humanize_prompt_does_not_include_internal_action_or_amount(monkeypatch)
     user_prompt = captured["messages"][1]["content"]
     assert "Approved action" not in user_prompt
     assert "Approved amount" not in user_prompt
+    assert "Copy contract" in user_prompt
     assert result["message"] == "I can offer a coupon here."
+
+
+def test_humanizer_rejects_copy_contract_violation(monkeypatch):
+    monkeypatch.setattr(
+        agent_service,
+        "_call_text_with_trace",
+        lambda messages, **kwargs: '{"message":"I asked the kitchen to remake it for you."}',
+    )
+    original = "I can add a ₹44 coupon now."
+    result = agent_service._humanize_message(
+        {
+            "action": "info",
+            "amount": 0,
+            "message": original,
+            "reason": "Offer coupon before refund or replacement",
+        },
+        complaint="sandwich was soggy",
+        order_items={"items": [{"name": "Grilled Paneer Club Sandwich", "price": 219}]},
+        history=[{"role": "user", "content": "sandwich was soggy"}],
+    )
+
+    assert result["message"] == original
 
 
 def test_humanizer_rejects_invented_product_policy_claims(monkeypatch):

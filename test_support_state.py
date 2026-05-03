@@ -37,6 +37,36 @@ def test_case_state_carries_margin_and_resolution_inputs():
     assert case_state["ops_context"]["owner_area"] == "kitchen"
 
 
+def test_case_state_carries_semantic_analysis():
+    case_state = build_case_state(
+        user_id="USER123",
+        order_id="ORD001",
+        session_id="support:semantic",
+        complaint="I selected Oreo but my Roohafza spilled",
+        order_details={"total_amount": 478},
+        order_items={"items": [{"name": "Roohafza Sharbat", "price": 99}]},
+        kitchen={"quality_out": "good"},
+        fleet={"delay_mins": 0},
+        trust={"score": 88, "total_orders": 8},
+        assessment={
+            "issue_type": "spill_leak",
+            "active_item_name": "Roohafza Sharbat",
+            "customer_meaning": "customer is correcting the item to Roohafza Sharbat and reporting a spill",
+            "reasoning_brief": "The free text names Roohafza despite the selected Oreo item.",
+            "uncertainty_reason": "",
+            "policy_risk_flags": ["item_mismatch", "evidence_needed"],
+            "semantic_risk": True,
+            "semantic_confidence": 0.94,
+        },
+        resolution_debug={"issue_type": "spill_leak", "active_item_name": "Roohafza Sharbat"},
+    )
+
+    semantic = case_state["semantic_analysis"]
+    assert semantic["customer_meaning"].startswith("customer is correcting")
+    assert semantic["policy_risk_flags"] == ["item_mismatch", "evidence_needed"]
+    assert semantic["semantic_risk"] is True
+
+
 def test_action_lifecycle_records_post_decision_status():
     lifecycle = action_lifecycle("refund", 120, _case_state())
 

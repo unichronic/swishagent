@@ -84,6 +84,19 @@ def _message_has_quantity_language(message: str) -> bool:
 def _action_message_errors(action: str, amount: float, message: str) -> list[str]:
     lowered = _lower(message)
     errors = []
+    operational_claims = (
+        "i asked the kitchen",
+        "i have asked the kitchen",
+        "kitchen will",
+        "dispatch will",
+        "rider will",
+        "team will review",
+        "it is on the way",
+        "on its way",
+        "quality check",
+    )
+    if any(claim in lowered for claim in operational_claims):
+        errors.append("message_invents_operational_claim")
     if action not in VALID_ACTIONS:
         errors.append(f"invalid_action:{action}")
     if action == "live_capture" and not any(term in lowered for term in ("photo", "video", "camera", "capture", "upload", "send")):

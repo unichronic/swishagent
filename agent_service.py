@@ -16,6 +16,7 @@ from typing import Optional
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
 
+import copy_contract
 from llm_client import call_text
 from rules import Rules, get_session, clear_session, get_session_state, mark_photo_provided, session_has_photo
 from support_state import attach_artifacts, build_case_state
@@ -138,6 +139,12 @@ def _assess_case(
                 "Use portion_size for too little, too small, skimpy, light-for-the-price, less quantity, or under-portioned complaints. "
                 "Semantic safety guidance: set selected_item_conflict=true when the structured/picked item or prior item conflicts with the item the customer is actually describing. "
                 "If selected_item_conflict=true, set mentioned_item_name to the closest order item the customer appears to mean and recommended_next_step=clarify unless the customer clearly corrected the item. "
+                "Before choosing fields, reason through what the customer probably means, including typos, item drift, issue/category mismatch, common-sense food context, and uncertainty. "
+                "Put that reasoning in short structured fields; do not expose it directly to the customer. "
+                "Set customer_meaning to a concise normalized interpretation of the latest customer message. "
+                "Set reasoning_brief to one short sentence explaining the decisive interpretation. "
+                "Set uncertainty_reason to one short sentence when the safe next step depends on missing or ambiguous context, otherwise empty string. "
+                "Set policy_risk_flags as a short list of risks like item_mismatch, issue_mismatch, dietary_asymmetry, evidence_needed, overcompensation_risk, or none. "
                 "Set semantic_risk=true when common sense says the deterministic flow may act on the wrong item, wrong issue, wrong category, or unsafe dietary interpretation. Set semantic_confidence from 0 to 1. "
                 "Set dietary_direction explicitly: nonveg_in_veg for meat/egg/chicken in veg/vegetarian food; veg_in_nonveg for plant/vegetable in meat/non-veg food; allergen for allergy/allergen risk; none otherwise. "
                 "Dietary asymmetry: non-veg in veg/vegetarian food is high dietary_severity and foreign_object/sensitive; vegetable/veg in non-veg food is usually low dietary_severity and quality/prep mix-up unless the customer mentions allergy, religion, or a strict dietary restriction that makes it serious. "
@@ -179,14 +186,14 @@ def _assess_case(
                 f"Fleet: {fleet}\n"
                 f"Trust: {trust}\n"
                 "If the text is messy, first mentally normalize what the customer probably meant, then classify it.\n"
-                'Return JSON only with keys: issue_type, issue_confidence, requested_resolution, requested_resolution_confidence, info_query, info_query_confidence, assurance_query, turn_act, turn_act_confidence, issue_severity, active_item_name, selected_item_conflict, mentioned_item_name, semantic_risk, semantic_confidence, semantic_risk_reason, dietary_severity, dietary_direction, visual_evidence_useful, fault_hint, recommended_next_step, clarification_needed, resolution_change, economic_preference, economic_confidence, tone_guardrail, negotiation_allowed, negotiation_strength, notes.'
+                'Return JSON only with keys: customer_meaning, reasoning_brief, uncertainty_reason, policy_risk_flags, issue_type, issue_confidence, requested_resolution, requested_resolution_confidence, info_query, info_query_confidence, assurance_query, turn_act, turn_act_confidence, issue_severity, active_item_name, selected_item_conflict, mentioned_item_name, semantic_risk, semantic_confidence, semantic_risk_reason, dietary_severity, dietary_direction, visual_evidence_useful, fault_hint, recommended_next_step, clarification_needed, resolution_change, economic_preference, economic_confidence, tone_guardrail, negotiation_allowed, negotiation_strength, notes.'
             ),
         },
     ]
     try:
         raw = _call_text_with_trace(
             messages,
-            temperature=0.1,
+            temperature=0.2,
             trace_name="llm.assess_case",
             trace_metadata={"component": "assessment"},
         )
@@ -286,6 +293,11 @@ def _humanize_message(
     }
     if resolution.get("reason") not in allowed_reasons:
         return resolution
+    contract = copy_contract.build_copy_contract(
+        resolution,
+        complaint=complaint,
+        order_items=order_items,
+    )
     item_names = [item.get("name", "item") for item in order_items.get("items", [])[:4]] if isinstance(order_items, dict) else []
     last_bot = next((msg.get("content", "") for msg in reversed(history[:-1]) if msg.get("role") == "bot"), "")
     messages = [
@@ -293,7 +305,8 @@ def _humanize_message(
             "role": "system",
             "content": (
                 "Rewrite support messages to sound like a real human support agent in chat, not like a model or a policy script. "
-                "Keep the exact action, item, amount, and outcome unchanged. "
+                "Follow the copy contract exactly. "
+                "Keep the exact action, item, amount, evidence status, uncertainty, and outcome unchanged. "
                 "Use a calm objection-handling style: brief acknowledgment, plain reason, one practical option, direct close. "
                 "When the original is negotiating toward a coupon or remake, keep that negotiation gentle and specific. "
                 "Do not add policy, promises, apologies beyond one brief acknowledgment, or new facts. "
@@ -316,6 +329,7 @@ def _humanize_message(
                 f"Recent bot message: {last_bot}\n"
                 f"Items in order: {', '.join(item_names)}\n"
                 f"Original message: {original}\n"
+                f"Copy contract: {json.dumps(contract, ensure_ascii=False, sort_keys=True)}\n"
                 "Rewrite:"
             ),
         },
@@ -332,6 +346,8 @@ def _humanize_message(
             return resolution
         candidate = parsed.get("message")
         if candidate:
+            if copy_contract.validate_candidate(candidate, contract):
+                return resolution
             if _humanizer_changed_meaning(candidate, original, complaint, resolution, order_items):
                 return resolution
             resolution["message"] = Rules._enforce_content({"message": candidate}).get("message", original)
@@ -674,6 +690,11 @@ def run(req: RunRequest, request: Request):
                     "debug": resolution.get("_debug"),
                 }
             )
+        if assessment:
+            resolution_debug = resolution.setdefault("_debug", {})
+            for key in ("customer_meaning", "reasoning_brief", "uncertainty_reason", "policy_risk_flags"):
+                if key in assessment:
+                    resolution_debug[key] = assessment.get(key)
         debug_meta = resolution.get("_debug", {})
         if not debug_meta:
             state_snapshot = get_session_state(session_id)

@@ -34,6 +34,24 @@ _primary_provider_idx = 0  # Will be set to first available provider
 # Track rate-limited providers with cooldown time
 _rate_limited_providers = {}  # {provider_name: cooldown_until_timestamp}
 
+
+def _request_timeout_seconds() -> float:
+    try:
+        value = float(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "14"))
+    except ValueError:
+        return 14.0
+    return max(3.0, min(value, 45.0))
+
+
+def _openai_client(base_url: str, api_key: str) -> OpenAI:
+    return OpenAI(
+        base_url=base_url,
+        api_key=api_key,
+        timeout=_request_timeout_seconds(),
+        max_retries=0,
+    )
+
+
 def call_text(messages: list, **kwargs) -> str:
     """Tier 1: try text providers in order, fall back to Gemini only if all fail."""
     global _primary_provider_idx, _rate_limited_providers
@@ -63,7 +81,7 @@ def call_text(messages: list, **kwargs) -> str:
                 input={"messages": messages, "parameters": kwargs},
                 metadata={**trace_metadata, "provider": p["name"], "base_url": p["base_url"]},
             ) as generation:
-                client = OpenAI(base_url=p["base_url"], api_key=key)
+                client = _openai_client(p["base_url"], key)
                 resp = client.chat.completions.create(model=p["model"], messages=messages, **kwargs)
                 content = resp.choices[0].message.content
                 usage = getattr(resp, "usage", None)
@@ -110,7 +128,7 @@ def call_text_judge(messages: list) -> str:
     if mistral_key:
         try:
             print(f"[llm-judge] Using Mistral", file=sys.stderr, flush=True)
-            client = OpenAI(base_url="https://api.mistral.ai/v1", api_key=mistral_key)
+            client = _openai_client("https://api.mistral.ai/v1", mistral_key)
             resp = client.chat.completions.create(model="mistral-medium-2505", messages=messages)
             return resp.choices[0].message.content
         except RateLimitError:
@@ -123,7 +141,7 @@ def call_text_judge(messages: list) -> str:
     if nvidia_key:
         try:
             print(f"[llm-judge] Using Nvidia", file=sys.stderr, flush=True)
-            client = OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=nvidia_key)
+            client = _openai_client("https://integrate.api.nvidia.com/v1", nvidia_key)
             resp = client.chat.completions.create(model="meta/llama-3.3-70b-instruct", messages=messages)
             return resp.choices[0].message.content
         except Exception as e:
@@ -153,9 +171,9 @@ def _call_gemini_text(messages: list, **kwargs) -> str:
                 input={"messages": messages, "parameters": gemini_kwargs},
                 metadata={**trace_metadata, "provider": "gemini", "key_index": _gemini_text_idx},
             ) as generation:
-                client = OpenAI(
-                    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-                    api_key=keys[_gemini_text_idx % len(keys)]
+                client = _openai_client(
+                    "https://generativelanguage.googleapis.com/v1beta/openai/",
+                    keys[_gemini_text_idx % len(keys)],
                 )
                 resp = client.chat.completions.create(model="gemini-2.5-flash", messages=messages, **gemini_kwargs)
                 content = resp.choices[0].message.content

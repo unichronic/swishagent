@@ -48,6 +48,22 @@ def test_quality_eval_catches_info_message_claiming_approval():
     assert "info_message_claims_compensation_approved" in errors
 
 
+def test_quality_eval_catches_invented_operational_claims():
+    errors = evaluate_response_quality(
+        {
+            "action": "info",
+            "amount": 0,
+            "message": "I asked the kitchen to remake it and the team will review it.",
+            "reason": "Offer coupon before refund or replacement",
+            "_debug": {"issue_type": "quality"},
+        },
+        complaint="sandwich was soggy",
+        expected_issue_type="quality",
+    )
+
+    assert "message_invents_operational_claim" in errors
+
+
 def test_quality_eval_accepts_grounded_coupon_offer():
     errors = evaluate_response_quality(
         {
