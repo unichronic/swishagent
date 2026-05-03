@@ -767,7 +767,7 @@ function App() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyPress={handleKeyPress}
-            placeholder={selectedItemName ? `Tell us what went wrong with ${selectedItemName.toLowerCase()}...` : 'Describe your issue...'}
+            placeholder="Tell us what went wrong"
             rows="1"
           />
           <button 
