@@ -471,6 +471,16 @@ def run(req: RunRequest, request: Request):
                 }
             )
         debug_meta = resolution.get("_debug", {})
+        if not debug_meta:
+            state_snapshot = get_session_state(session_id)
+            debug_meta = {
+                "issue_type": state_snapshot.get("issue_type"),
+                "issue_severity": state_snapshot.get("issue_severity"),
+                "evidence_strength": state_snapshot.get("evidence_strength"),
+                "requested_resolution": state_snapshot.get("desired_resolution") or "none",
+                "active_item_name": state_snapshot.get("active_item_name"),
+                "fault": state_snapshot.get("fault") or state_snapshot.get("ops_fault"),
+            }
         logger.info(
             "turn_analysis order_id=%s user_id=%s assessment_status=%s issue_type=%s issue_type_source=%s issue_confidence=%s requested_resolution=%s active_item=%s issue_severity=%s evidence_strength=%s economic_preference=%s visual_evidence_useful=%s visual_evidence_source=%s fault=%s fault_source=%s turn_act=%s recommended_next_step=%s clarification_needed=%s",
             req.order_id,

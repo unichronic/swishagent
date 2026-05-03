@@ -2655,3 +2655,172 @@ def test_llm_fault_hint_can_break_unclear_tie_but_not_override_clear_data():
 
     assert result["_debug"]["fault"] == "kitchen"
     assert result["_debug"]["fault_source"] == "fallback"
+
+
+def test_strong_hinglish_spill_signal_overrides_generic_quality_assessment():
+    session_id = "test:hinglish-spill-override"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    msg = "Roohafza Sharbat bag me spill ho gaya tha aur refund chahiye"
+    history.append({"role": "user", "content": msg})
+    result = Rules.resolve(
+        complaint=msg,
+        conversation_history=history,
+        order_value=756,
+        trust_score=88,
+        kitchen={"quality_out": "good", "prep_time_mins": 12, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 88, "total_orders": 24},
+        order_details={"total_amount": 756},
+        order_items={"items": [{"name": "Roohafza Sharbat", "price": 79}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "quality",
+            "issue_confidence": 0.91,
+            "requested_resolution": "refund",
+            "requested_resolution_confidence": 0.92,
+            "active_item_name": "Roohafza Sharbat",
+        },
+    )
+
+    assert result["action"] == "live_capture"
+    assert get_session_state(session_id)["issue_type"] == "spill_leak"
+
+
+def test_strong_hinglish_quantity_signal_overrides_generic_quality_assessment():
+    session_id = "test:hinglish-portion-override"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    msg = "Mini Punjabi Aloo Samosa quantity bahut kam thi"
+    history.append({"role": "user", "content": msg})
+    result = Rules.resolve(
+        complaint=msg,
+        conversation_history=history,
+        order_value=437,
+        trust_score=88,
+        kitchen={"quality_out": "good", "prep_time_mins": 12, "temperature_check": "hot"},
+        fleet={"delay_mins": 3, "traffic_flag": False},
+        trust={"score": 88, "total_orders": 24},
+        order_details={"total_amount": 437},
+        order_items={"items": [{"name": "Mini Punjabi Aloo Samosa", "price": 99}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "quality",
+            "issue_confidence": 0.91,
+            "active_item_name": "Mini Punjabi Aloo Samosa",
+        },
+    )
+
+    assert result["_debug"]["issue_type"] == "portion_size"
+    assert "portion" in result["message"].lower() or "light" in result["message"].lower()
+
+
+def test_resolution_followup_keeps_active_portion_case():
+    session_id = "test:portion-followup-keeps-case"
+    clear_session(session_id)
+
+    first = _run_turn(session_id, "Mini Punjabi Aloo Samosa quantity bahut kam thi", order_value=437)
+    second = _run_turn(session_id, "coupon ya refund kya milega", order_value=437)
+
+    assert first["_debug"]["issue_type"] == "portion_size"
+    assert second["_debug"]["issue_type"] == "portion_size"
+
+
+def test_hinglish_status_query_is_detected():
+    session_id = "test:status-batao"
+    clear_session(session_id)
+
+    result = _run_turn(session_id, "status batao", order_value=168)
+
+    assert result["_debug"]["issue_type"] == "info_query"
+    assert "marked" in result["message"].lower() or "progress" in result["message"].lower()
+
+
+def test_safety_case_stays_sticky_across_followups():
+    session_id = "test:sticky-safety-followups"
+    clear_session(session_id)
+
+    first = _run_turn(session_id, "Classic Maggi me plastic ka piece mila")
+    second = _run_turn(session_id, "please escalate this")
+    third = _run_turn(session_id, "refund se zyada mujhe safety concern hai")
+
+    assert first["_debug"]["issue_type"] == "foreign_object"
+    assert second["_debug"]["issue_type"] == "foreign_object"
+    assert get_session_state(session_id)["issue_type"] == "foreign_object"
+
+
+def test_spill_case_stays_sticky_across_evidence_and_update_followups():
+    session_id = "test:sticky-spill-followups"
+    clear_session(session_id)
+
+    first = _run_turn(session_id, "Cold Coffee bag me spill ho gaya")
+    second = _run_turn(session_id, "photo bhej diya")
+    third = _run_turn(session_id, "will I get any update in the app?")
+
+    assert first["_debug"]["issue_type"] == "spill_leak"
+    assert second["_debug"]["issue_type"] == "spill_leak"
+    assert third["_debug"]["issue_type"] == "spill_leak"
+
+
+def test_delay_only_case_does_not_become_food_quality_or_replacement():
+    session_id = "test:sticky-delay-followups"
+    clear_session(session_id)
+
+    first = _run_turn(session_id, "order 25 minute late tha but food okay hai", order_value=168)
+    second = _run_turn(session_id, "coupon milega kya delay ke liye?", order_value=168)
+    third = _run_turn(session_id, "can you confirm what you have noted?", order_value=168)
+
+    assert first["_debug"]["issue_type"] == "delay"
+    assert second["_debug"]["issue_type"] == "delay"
+    assert third["_debug"]["issue_type"] == "delay"
+    assert "fresh item" not in third["message"].lower()
+
+
+def test_non_delivery_delivery_partner_signal_maps_to_missing_item():
+    session_id = "test:delivery-partner-non-delivery"
+    clear_session(session_id)
+
+    first = _run_turn(session_id, "rider ne bola item nahi hai but app delivered dikha raha hai")
+    second = _run_turn(session_id, "mujhe order receive nahi hua")
+
+    assert first["_debug"]["issue_type"] == "missing_item"
+    assert second["_debug"]["issue_type"] == "missing_item"
+
+
+def test_payment_billing_query_does_not_become_food_quality():
+    session_id = "test:payment-billing-info"
+    clear_session(session_id)
+
+    first = _run_turn(session_id, "payment cut gaya but order fail ho gaya")
+    second = _run_turn(session_id, "UPI se amount debit hua")
+    third = _run_turn(session_id, "refund timeline batao")
+
+    assert first["_debug"]["issue_type"] == "info_query"
+    assert second["_debug"]["issue_type"] == "info_query"
+    assert third["_debug"]["issue_type"] == "info_query"
+
+
+def test_another_person_is_not_misread_as_replacement_request():
+    session_id = "test:another-person-not-replacement"
+    clear_session(session_id)
+
+    first = _run_turn(session_id, "order 25 minute late tha but food okay hai", order_value=168)
+    second = _run_turn(session_id, "I don't want to explain this again to another person", order_value=168)
+
+    assert first["_debug"]["issue_type"] == "delay"
+    assert second["_debug"]["requested_resolution"] == "none"
+    assert "fresh item" not in second["message"].lower()
+
+
+def test_negated_refund_does_not_start_compensation_flow():
+    session_id = "test:refund-negation"
+    clear_session(session_id)
+
+    first = _run_turn(session_id, "order 25 minute late tha but food okay hai", order_value=168)
+    second = _run_turn(session_id, "food refund nahi chahiye", order_value=168)
+
+    assert first["_debug"]["issue_type"] == "delay"
+    assert second["_debug"]["requested_resolution"] == "none"
+    assert second["action"] == "info"

@@ -167,10 +167,24 @@ class Rules:
             if assessment_provided
             else Rules._detect_requested_resolution(complaint, state)
         )
+        payment_or_billing_query = Rules._is_payment_or_billing_query(user_text) or (
+            state.get("case_issue_type") == "info_query" and Rules._is_followup_or_evidence_turn(user_text)
+        )
+        if payment_or_billing_query:
+            issue_type = "info_query"
+            wants = "none"
+        if Rules._is_non_delivery_signal(user_text):
+            issue_type = "missing_item"
         if Rules._is_resolution_only_turn(complaint) and state.get("issue_type") and (
             issue_type == "other" or not assessment_provided
         ):
             issue_type = state.get("issue_type", issue_type)
+        if (
+            wants in {"refund", "replacement", "coupon", "credit"}
+            and state.get("case_issue_type")
+            and not Rules._has_concrete_issue_signal(user_text)
+        ):
+            issue_type = state.get("case_issue_type", issue_type)
         if assessment_provided and issue_type == "other" and wants in {"refund", "replacement"} and state.get("issue_type"):
             issue_type = state.get("issue_type", issue_type)
         if photo_url and state.get("issue_type"):
@@ -178,6 +192,10 @@ class Rules:
         prep_anomaly = Rules._looks_like_prep_anomaly(user_text)
         if issue_type == "foreign_object" and prep_anomaly:
             issue_type = "quality"
+        issue_type = Rules._strong_text_issue_override(user_text, issue_type)
+        if payment_or_billing_query:
+            issue_type = "info_query"
+            wants = "none"
         info_query = Rules._choose_info_query(
             assessed_info_query=assessed_info_query,
             assessed_info_query_confidence=assessed_info_query_confidence,
@@ -198,6 +216,7 @@ class Rules:
         if Rules._should_inherit_case_issue_type(
             text=user_text,
             state=state,
+            issue_type=issue_type,
             wants=wants,
             info_query=info_query,
             turn_act=turn_act,
@@ -336,6 +355,7 @@ class Rules:
             return Rules._enforce_content(response)
 
         if state.get("last_action") == "escalate" and info_query == "none":
+            issue_type = state.get("case_issue_type", issue_type)
             response = {
                 "action": "escalate",
                 "amount": 0.0,
@@ -362,6 +382,36 @@ class Rules:
             return Rules._enforce_content(response)
 
         pending = state.get("pending")
+        if pending and info_query != "none":
+            response = {
+                "action": "info",
+                "amount": 0.0,
+                "message": Rules._info_query_message(info_query, order_details, order_items, fleet, state, last_bot_msg),
+                "reason": "User asked for order information during an active resolution flow",
+            }
+            Rules._store_terminal_state(state)
+            response = Rules._enforce_content(response)
+            response["_debug"] = {
+                "issue_type": issue_type,
+                "issue_type_source": "fallback",
+                "issue_confidence": assessed_issue_confidence,
+                "fault": fault,
+                "fault_source": "llm" if fault == assessed_fault_hint and assessed_fault_hint else "fallback",
+                "visual_evidence_useful": needs_visual,
+                "requested_resolution": wants,
+                "active_item_name": item.get("name") or state.get("active_item_name"),
+                "issue_severity": issue_severity,
+                "evidence_strength": evidence_strength,
+                "economic_preference": economic_preference,
+                "turn_act": turn_act,
+                "info_query_confidence": assessed_info_query_confidence,
+                "recommended_next_step": assessed_recommended_next_step or "fallback",
+                "clarification_needed": clarification_needed,
+                "tone_guardrail": tone_guardrail,
+                "negotiation_allowed": negotiation_allowed,
+                "negotiation_strength": negotiation_strength,
+            }
+            return response
         if pending == "coupon":
             response = Rules._handle_coupon_reply(
                 complaint=complaint,
@@ -1340,7 +1390,7 @@ class Rules:
             return "I can't verify enough on my side to approve a remake directly. If you'd like to take it further, please email hello@justswish.in and the team can review it from there."
         if resolution_type == "refund":
             return "I can't lock in a cash refund directly from what I can verify here. If you'd like to take it further, please email hello@justswish.in and the team can review it from there."
-        return "I can't close this properly from chat alone. If you'd like to take it further, please email hello@justswish.in and the team can pick it up from there."
+        return "I can't close this properly from chat alone. If you'd like to take it further, please email hello@justswish.in and the team can review it from there."
 
     @staticmethod
     def _choose_issue_severity(
@@ -1668,13 +1718,17 @@ class Rules:
     @staticmethod
     def _detect_issue_type(complaint: str, item_name: str = "") -> str:
         text = _lower(complaint)
+        if Rules._is_payment_or_billing_query(text):
+            return "info_query"
+        if Rules._is_non_delivery_signal(text):
+            return "missing_item"
         if Rules._detect_info_query(complaint) != "none":
             return "info_query"
-        if Rules._looks_like_dietary_violation(text):
-            return "foreign_object"
         if Rules._looks_like_ingredient_mismatch(text):
             return "quality"
-        if any(word in text for word in ["wrong item", "different item", "got something else", "not what i ordered"]):
+        if Rules._looks_like_dietary_violation(text):
+            return "foreign_object"
+        if Rules._is_wrong_order_signal(text):
             return "wrong_item"
         if any(word in text for word in ["missing", "didn't get", "did not get", "not delivered", "left out"]):
             return "missing_item"
@@ -1713,19 +1767,79 @@ class Rules:
             return "portion_size"
         if re.search(r"\b(?:was|were|is)\s+less\b", text):
             return "portion_size"
-        if any(word in text for word in ["cold", "not hot", "warm", "chilled"]):
+        if any(word in text for word in ["sweet", "meetha", "salty", "bland", "burnt", "raw", "soggy", "terrible", "inedible", "bad taste"]):
+            return "quality"
+        if Rules._is_temperature_signal(text):
             return "temperature"
         if any(word in text for word in ["late", "delay", "delayed", "where is my order", "eta"]):
             return "delay"
-        if any(word in text for word in ["sweet", "salty", "bland", "burnt", "raw", "soggy", "terrible", "inedible", "bad taste"]):
-            return "quality"
         if item_name and item_name.lower() in text:
             return "quality"
         return "quality"
 
     @staticmethod
+    def _strong_text_issue_override(text: str, current_issue_type: str) -> str:
+        if not text:
+            return current_issue_type
+        if Rules._is_payment_or_billing_query(text):
+            return "info_query"
+        if Rules._is_non_delivery_signal(text):
+            return "missing_item"
+        if Rules._is_wrong_order_signal(text):
+            return "wrong_item"
+        if Rules._is_spill_contamination_signal(text):
+            return "spill_leak"
+        if Rules._is_temperature_signal(text):
+            return "temperature"
+        if any(phrase in text for phrase in ["order hi nahi", "not my order", "different items", "kisi aur ka naam", "someone else"]):
+            return "wrong_item"
+        if Rules._looks_like_ingredient_mismatch(text):
+            return "quality"
+        if Rules._looks_like_dietary_violation(text):
+            return "foreign_object"
+        spill_context = any(
+            token in text
+            for token in (
+                "bag",
+                "cup",
+                "bottle",
+                "container",
+                "box",
+                "drink",
+                "shake",
+                "coffee",
+                "sharbat",
+                "curry",
+                "salad",
+                "bowl",
+                "pasta",
+                "sauce",
+                "gravy",
+                "leak",
+                "leaked",
+                "leaking",
+                "andar",
+            )
+        )
+        if re.search(r"\b(spill|spilled|spillage|leak|leaked|leaking|gir gaya|gir gya|gir gayi|gir gayi thi)\b", text):
+            return "spill_leak" if spill_context else "damaged"
+        if "bag me spill" in text or "bag mein spill" in text or "andar spill" in text:
+            return "spill_leak"
+        if re.search(r"\b(quantity|qty|portion)\s+(bahut\s+)?(kam|less|low)\b", text):
+            return "portion_size"
+        if re.search(r"\b(kam|less)\s+(quantity|portion)\b", text):
+            return "portion_size"
+        if any(phrase in text for phrase in ["bahut kam thi", "bahut kam tha", "quantity kam thi", "quantity kam tha", "size very small", "size bahut small", "pieces small"]):
+            return "portion_size"
+        return current_issue_type
+
+    @staticmethod
     def _detect_requested_resolution(complaint: str, state: Dict[str, Any]) -> str:
         text = _lower(complaint)
+        if Rules._negates_resolution(text, "refund"):
+            return state.get("desired_resolution", "none") if state.get("pending") in {"coupon", "refund_amount"} else "none"
+        if Rules._negates_resolution(text, "replacement"):
+            return state.get("desired_resolution", "none") if state.get("pending") in {"coupon", "replacement_confirm"} else "none"
         if Rules._mentions_replacement(text):
             return "replacement"
         if Rules._mentions_refund(text):
@@ -1795,7 +1909,7 @@ class Rules:
         )
         if not has_non_veg_term:
             return False
-        if any(term in text for term in veg_context_terms):
+        if any(re.search(rf"\b{re.escape(term)}\b", text) for term in veg_context_terms):
             return True
         return bool(re.search(r"\b(piece|bits?|chunks?)\s+of\s+(chick(?:en)?|egg|meat|fish|mutton|beef|prawn|pork)\b", text))
 
@@ -1889,25 +2003,166 @@ class Rules:
             "uncooked",
             "undercooked",
             "overcooked",
+        ]
+        return any(keyword in text for keyword in concrete_keywords)
+
+    @staticmethod
+    def _has_strong_new_issue_signal(text: str, current_issue_type: str) -> bool:
+        if not text:
+            return False
+        detected = Rules._strong_text_issue_override(text, Rules._detect_issue_type(text))
+        if detected in {"info_query", "other"}:
+            return False
+        if detected == current_issue_type:
+            return False
+        if current_issue_type == "temperature" and detected == "delay":
+            return False
+        if Rules._is_followup_or_evidence_turn(text):
+            return False
+        return Rules._has_concrete_issue_signal(text)
+
+    @staticmethod
+    def _is_followup_or_evidence_turn(text: str) -> bool:
+        if not text:
+            return False
+        followup_phrases = [
             "photo",
             "video",
             "attached",
+            "upload",
             "proof",
+            "review",
+            "escalate",
+            "supervisor",
+            "update",
+            "app",
+            "what happens now",
+            "next step",
+            "confirm",
+            "noted",
+            "explain this again",
+            "keep it practical",
+            "closed without resolution",
+            "wait for the update",
+            "order context",
+            "feedback",
+            "safety concern",
+            "safety issue",
+            "safety",
+            "serious for me",
+            "serious",
+            "same issue",
+            "matlab",
+            "regular customer",
+            "trust",
+            "veg item",
+            "order kiya tha",
+            "chahiye tha",
+            "same item",
+            "otherwise",
+            "reopen",
+            "start again",
+            "resolution chahiye",
+            "resolution",
+            "mere items",
+            "my items",
+            "baaki items",
         ]
-        return any(keyword in text for keyword in concrete_keywords)
+        if any(phrase in text for phrase in followup_phrases):
+            return True
+        tokens = re.findall(r"[a-z0-9]+", text)
+        return len(tokens) <= 5 and any(token in text for token in ["okay", "fine", "thanks", "yes", "haan"])
+
+    @staticmethod
+    def _is_non_delivery_signal(text: str) -> bool:
+        if not text:
+            return False
+        delivered_not_received = (
+            ("delivered" in text or "deliver" in text or "app" in text)
+            and any(phrase in text for phrase in ["receive nahi", "not received", "did not receive", "didn't receive", "nahi mila", "not got"])
+        )
+        rider_problem = any(phrase in text for phrase in ["rider", "delivery partner", "partner", "driver"]) and any(
+            phrase in text for phrase in ["item nahi", "receive nahi", "not received", "delivered dikha", "answer nahi", "call"]
+        )
+        return delivered_not_received or rider_problem or "order receive nahi hua" in text
+
+    @staticmethod
+    def _is_wrong_order_signal(text: str) -> bool:
+        if not text:
+            return False
+        direct_patterns = [
+            "wrong item",
+            "different item",
+            "different items",
+            "got something else",
+            "not what i ordered",
+            "order hi nahi",
+            "not my order",
+            "kisi aur ka naam",
+            "someone else",
+        ]
+        if any(pattern in text for pattern in direct_patterns):
+            return True
+        return bool(re.search(r"\b(order(?:ed)?|order kiya tha|manga tha).{0,60}\b(but|par|lekin).{0,60}\b(aa gaya|aaya|got|received)\b", text))
+
+    @staticmethod
+    def _is_spill_contamination_signal(text: str) -> bool:
+        if not text:
+            return False
+        spillable = ["sharbat", "coffee", "shake", "drink", "sauce", "gravy", "curry"]
+        contaminated = ["box", "bag", "container", "food", "item", "pasta", "bowl"]
+        return any(term in text for term in spillable) and any(term in text for term in contaminated) and any(
+            phrase in text for phrase in ["lag gaya", "lag gya", "spread", "soaked", "wet"]
+        )
+
+    @staticmethod
+    def _is_temperature_signal(text: str) -> bool:
+        if not text:
+            return False
+        if "cold coffee" in text and not any(phrase in text for phrase in ["warm", "not cold", "should be cold", "chilled nahi"]):
+            return False
+        return any(word in text for word in ["not hot", "warm", "chilled", "cold aa", "cold aaya", "cold aya", "bilkul cold", "garam hona", "thanda"])
+
+    @staticmethod
+    def _is_payment_or_billing_query(text: str) -> bool:
+        if not text:
+            return False
+        payment_terms = ["payment", "upi", "debit", "debited", "transaction", "amount cut", "cut gaya", "billing", "charged"]
+        order_failure_terms = ["order fail", "failed order", "order failed", "fail ho gaya", "refund timeline"]
+        if any(term in text for term in payment_terms):
+            return True
+        return any(term in text for term in order_failure_terms)
 
     @staticmethod
     def _should_inherit_case_issue_type(
         text: str,
         state: Dict[str, Any],
+        issue_type: str,
         wants: str,
         info_query: str,
         turn_act: str,
     ) -> bool:
-        if not state.get("case_issue_type"):
+        case_issue_type = state.get("case_issue_type")
+        if not case_issue_type:
             return False
-        if wants != "none" or info_query != "none":
+        if state.get("last_action") == "escalate":
+            return True
+        if info_query != "none" or issue_type == "info_query":
             return False
+        sticky_types = {
+            "missing_item",
+            "wrong_item",
+            "spill_leak",
+            "damaged",
+            "foreign_object",
+            "portion_size",
+            "temperature",
+            "delay",
+        }
+        if case_issue_type in sticky_types and Rules._is_followup_or_evidence_turn(text):
+            return not Rules._has_strong_new_issue_signal(text, case_issue_type)
+        if wants in {"refund", "replacement", "coupon", "credit"}:
+            return not Rules._has_strong_new_issue_signal(text, case_issue_type)
         if turn_act not in {"none", "clarify"}:
             return False
         if Rules._has_concrete_issue_signal(text):
@@ -1935,7 +2190,13 @@ class Rules:
         status_patterns = [
             "where is my order",
             "what is the status",
+            "status batao",
+            "status btao",
+            "status kya hai",
             "order status",
+            "delivered dikha",
+            "delivered dikha raha",
+            "dikha raha hai",
             "when was it delivered",
             "how long",
             "eta",
@@ -1966,15 +2227,37 @@ class Rules:
 
     @staticmethod
     def _mentions_refund(text: str) -> bool:
+        if Rules._negates_resolution(text, "refund"):
+            return False
         return any(word in text for word in ["refund", "money back", "my money", "cash back"]) or Rules._contains_fuzzy_keyword(
             text, ["refund"]
         )
 
     @staticmethod
     def _mentions_replacement(text: str) -> bool:
-        return any(word in text for word in ["replacement", "replace", "another one", "send another", "fresh order", "re-deliver", "redeliver"]) or Rules._contains_fuzzy_keyword(
-            text, ["replacement", "replace", "redeliver", "another"]
+        if Rules._negates_resolution(text, "replacement"):
+            return False
+        return any(word in text for word in ["replacement", "replace", "another one", "send another", "get me another", "fresh order", "re-deliver", "redeliver"]) or Rules._contains_fuzzy_keyword(
+            text, ["replacement", "replace", "redeliver"]
         )
+
+    @staticmethod
+    def _negates_resolution(text: str, resolution: str) -> bool:
+        if not text:
+            return False
+        if resolution == "refund":
+            patterns = [
+                r"\brefund\s+(nahi|nahin|not)\b",
+                r"\b(no|not|dont|don't|do not)\s+(want\s+)?refund\b",
+                r"\brefund\s+nahi\s+chahiye\b",
+            ]
+        else:
+            patterns = [
+                r"\b(replacement|replace|redelivery|re-delivery)\s+(nahi|nahin|not)\b",
+                r"\b(no|not|dont|don't|do not)\s+(want\s+)?(replacement|replace|redelivery|re-delivery)\b",
+                r"\b(replacement|redelivery|re-delivery)\s+nahi\s+chahiye\b",
+            ]
+        return any(re.search(pattern, text) for pattern in patterns)
 
     @staticmethod
     def _contains_fuzzy_keyword(text: str, keywords: List[str], threshold: float = 0.78) -> bool:
@@ -2405,6 +2688,7 @@ class Rules:
     def _contains_false_promise(text: str) -> bool:
         patterns = [
             r"\b(i'll|i will)\s+(check|see|arrange|get|send|call|contact|follow|reach|look|find)",
+            r"\b(i'll|i will)\s+(remake|replace|refund|credit|coupon|compensate|approve)",
             r"\b(i'll|i will)\s+pass\s+this\s+to\s+the\s+team",
             r"\b(i'll|i will)\s+flag\s+this\s+with\s+the\s+team",
             r"\blet me\s+(check|see|arrange|get|send|call|contact|follow|reach|look|find)",

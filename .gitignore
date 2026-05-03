@@ -35,12 +35,14 @@ docs/
 !docs/
 docs/*
 !docs/support-principles.md
+!docs/conversation-example-research.md
 convo
 
 # debug / audit / temp files
 *.md
 !README.md
 !docs/support-principles.md
+!docs/conversation-example-research.md
 
 # parallel go port (wip, not ready)
 parallel-go/

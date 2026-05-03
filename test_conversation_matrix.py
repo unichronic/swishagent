@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import pytest
 
 from order_data import ORDER_DATABASE
-from rules import Rules, clear_session, get_session, mark_photo_provided, session_has_photo
+from rules import Rules, clear_session, get_session, get_session_state, mark_photo_provided, session_has_photo
 from support_state import style_warnings
 
 
@@ -27,6 +27,8 @@ class ConversationCase:
     turns: tuple[dict, ...]
     expected_terminal_action: str
     expected_message_bits: tuple[str, ...] = ()
+    expected_terminal_issue_type: str = ""
+    expected_max_amount: float | None = None
 
 
 def _runtime_context(order_id: str, issue_type: str) -> dict:
@@ -65,6 +67,7 @@ def _run_turn(
     photo_url: str | None = None,
     photo_valid: bool | None = None,
     assessment: dict | None = None,
+    trust_score: float | None = None,
 ):
     order = ORDER_DATABASE[order_id]
     ctx = _runtime_context(order_id, issue_type)
@@ -76,7 +79,7 @@ def _run_turn(
         complaint=complaint,
         conversation_history=history,
         order_value=order["total_amount"],
-        trust_score=float(ctx["trust"]["score"]),
+        trust_score=float(trust_score if trust_score is not None else ctx["trust"]["score"]),
         kitchen=ctx["kitchen"],
         fleet=ctx["fleet"],
         trust=ctx["trust"],
@@ -90,6 +93,11 @@ def _run_turn(
     )
     history.append({"role": "bot", "content": result["message"]})
     return result
+
+
+def _result_issue_type(result: dict, session_id: str) -> str | None:
+    debug = result.get("_debug") or {}
+    return debug.get("issue_type") or get_session_state(session_id).get("issue_type")
 
 
 def _is_liquidish(item: dict) -> bool:
@@ -374,6 +382,592 @@ def _conversation_cases() -> list[ConversationCase]:
             ),
             expected_terminal_action="info",
             expected_message_bits=("delivered",),
+            expected_terminal_issue_type="info_query",
+        ),
+        ConversationCase(
+            case_id="missing-item-proof-pressure-caps-to-item",
+            order_id="ORD001",
+            item_name="Peri Peri French Fries",
+            turns=(
+                {
+                    "issue_type": "missing_item",
+                    "complaint": "Peri Peri French Fries missing hai, bag me sirf bowl hai",
+                    "assessment": {
+                        "issue_type": "missing_item",
+                        "issue_confidence": 0.96,
+                        "active_item_name": "Peri Peri French Fries",
+                        "visual_evidence_useful": True,
+                    },
+                },
+                {
+                    "issue_type": "missing_item",
+                    "complaint": "maine poore order ka paisa diya full refund karo",
+                    "assessment": {
+                        "issue_type": "missing_item",
+                        "issue_confidence": 0.96,
+                        "active_item_name": "Peri Peri French Fries",
+                        "requested_resolution": "refund",
+                        "requested_resolution_confidence": 0.95,
+                    },
+                },
+            ),
+            expected_terminal_action="live_capture",
+            expected_message_bits=("photo",),
+            expected_terminal_issue_type="missing_item",
+            expected_max_amount=209,
+        ),
+        ConversationCase(
+            case_id="high-value-missing-low-trust-needs-proof",
+            order_id="ORD004",
+            item_name="Dhaba Style Chicken Curry Rice Bowl",
+            turns=(
+                {
+                    "issue_type": "missing_item",
+                    "complaint": "Dhaba Style Chicken Curry Rice Bowl missing hai, refund now",
+                    "trust_score": 35,
+                    "assessment": {
+                        "issue_type": "missing_item",
+                        "issue_confidence": 0.95,
+                        "active_item_name": "Dhaba Style Chicken Curry Rice Bowl",
+                        "requested_resolution": "refund",
+                        "requested_resolution_confidence": 0.95,
+                        "visual_evidence_useful": True,
+                    },
+                },
+            ),
+            expected_terminal_action="live_capture",
+            expected_message_bits=("photo",),
+            expected_terminal_issue_type="missing_item",
+        ),
+        ConversationCase(
+            case_id="wrong-item-partial-order-asks-evidence",
+            order_id="ORD002",
+            item_name="Caesar Salad (Non-Veg)",
+            turns=(
+                {
+                    "issue_type": "wrong_item",
+                    "complaint": "Caesar Salad order kiya tha but sandwich aa gaya, baaki items sahi hain",
+                    "assessment": {
+                        "issue_type": "wrong_item",
+                        "issue_confidence": 0.95,
+                        "active_item_name": "Caesar Salad (Non-Veg)",
+                        "visual_evidence_useful": True,
+                    },
+                },
+                {
+                    "issue_type": "wrong_item",
+                    "complaint": "refund chahiye",
+                    "assessment": {
+                        "issue_type": "wrong_item",
+                        "issue_confidence": 0.95,
+                        "active_item_name": "Caesar Salad (Non-Veg)",
+                        "requested_resolution": "refund",
+                        "requested_resolution_confidence": 0.94,
+                    },
+                },
+            ),
+            expected_terminal_action="live_capture",
+            expected_message_bits=("photo",),
+            expected_terminal_issue_type="wrong_item",
+        ),
+        ConversationCase(
+            case_id="entire-wrong-order-escalates-after-proof-fails",
+            order_id="ORD001",
+            item_name="item",
+            turns=(
+                {
+                    "issue_type": "wrong_item",
+                    "complaint": "ye mera order hi nahi hai kisi aur ka naam receipt pe hai",
+                    "assessment": {
+                        "issue_type": "wrong_item",
+                        "issue_confidence": 0.95,
+                        "requested_resolution": "refund",
+                        "requested_resolution_confidence": 0.9,
+                        "visual_evidence_useful": True,
+                    },
+                },
+                {
+                    "issue_type": "wrong_item",
+                    "complaint": "photo bhej diya",
+                    "photo_url": "https://example.com/wrong-order.jpg",
+                    "photo_valid": False,
+                    "assessment": {
+                        "issue_type": "wrong_item",
+                        "issue_confidence": 0.95,
+                        "requested_resolution": "refund",
+                        "requested_resolution_confidence": 0.9,
+                        "visual_evidence_useful": True,
+                    },
+                },
+            ),
+            expected_terminal_action="escalate",
+            expected_message_bits=("review",),
+            expected_terminal_issue_type="wrong_item",
+        ),
+        ConversationCase(
+            case_id="solid-item-spill-clarifies-not-blind-refund",
+            order_id="ORD002",
+            item_name="Grilled Paneer Club Sandwich",
+            turns=(
+                {
+                    "issue_type": "damaged",
+                    "complaint": "Grilled Paneer Club Sandwich spill ho gaya",
+                    "assessment": {
+                        "issue_type": "damaged",
+                        "issue_confidence": 0.72,
+                        "active_item_name": "Grilled Paneer Club Sandwich",
+                        "clarification_needed": True,
+                        "recommended_next_step": "clarify",
+                    },
+                },
+            ),
+            expected_terminal_action="info",
+            expected_message_bits=("sandwich",),
+            expected_terminal_issue_type="damaged",
+        ),
+        ConversationCase(
+            case_id="taste-only-quality-stays-capped",
+            order_id="ORD004",
+            item_name="Veg Pink Sauce Pasta",
+            turns=(
+                {
+                    "issue_type": "quality",
+                    "complaint": "Veg Pink Sauce Pasta ka taste acha nahi tha",
+                    "assessment": {
+                        "issue_type": "quality",
+                        "issue_confidence": 0.86,
+                        "active_item_name": "Veg Pink Sauce Pasta",
+                    },
+                },
+                {
+                    "issue_type": "quality",
+                    "complaint": "refund chahiye",
+                    "assessment": {
+                        "issue_type": "quality",
+                        "issue_confidence": 0.86,
+                        "active_item_name": "Veg Pink Sauce Pasta",
+                        "requested_resolution": "refund",
+                        "requested_resolution_confidence": 0.93,
+                    },
+                },
+            ),
+            expected_terminal_action="info",
+            expected_message_bits=("coupon",),
+            expected_terminal_issue_type="quality",
+        ),
+        ConversationCase(
+            case_id="objective-quality-negotiates-before-refund",
+            order_id="ORD004",
+            item_name="Dhaba Style Chicken Curry Rice Bowl",
+            turns=(
+                {
+                    "issue_type": "quality",
+                    "complaint": "Chicken curry rice bowl burnt smell aa rahi thi khane layak nahi tha",
+                    "assessment": {
+                        "issue_type": "quality",
+                        "issue_confidence": 0.95,
+                        "active_item_name": "Dhaba Style Chicken Curry Rice Bowl",
+                        "issue_severity": "medium",
+                    },
+                },
+                {
+                    "issue_type": "quality",
+                    "complaint": "refund do",
+                    "assessment": {
+                        "issue_type": "quality",
+                        "issue_confidence": 0.95,
+                        "active_item_name": "Dhaba Style Chicken Curry Rice Bowl",
+                        "requested_resolution": "refund",
+                        "requested_resolution_confidence": 0.94,
+                    },
+                },
+            ),
+            expected_terminal_action="info",
+            expected_message_bits=("coupon",),
+            expected_terminal_issue_type="quality",
+        ),
+        ConversationCase(
+            case_id="cold-food-delay-caused-capped-offer",
+            order_id="ORD005",
+            item_name="Mini Punjabi Aloo Samosa",
+            turns=(
+                {
+                    "issue_type": "temperature",
+                    "complaint": "Mini Punjabi Aloo Samosa garam hona chahiye tha but cold aa gaya",
+                    "assessment": {
+                        "issue_type": "temperature",
+                        "issue_confidence": 0.93,
+                        "active_item_name": "Mini Punjabi Aloo Samosa",
+                    },
+                },
+                {
+                    "issue_type": "temperature",
+                    "complaint": "coupon ya refund kya milega",
+                    "assessment": {
+                        "issue_type": "temperature",
+                        "issue_confidence": 0.93,
+                        "active_item_name": "Mini Punjabi Aloo Samosa",
+                        "requested_resolution": "refund",
+                        "requested_resolution_confidence": 0.82,
+                    },
+                },
+            ),
+            expected_terminal_action="info",
+            expected_message_bits=("coupon",),
+            expected_terminal_issue_type="temperature",
+        ),
+        ConversationCase(
+            case_id="delay-food-fine-does-not-food-refund",
+            order_id="ORD003",
+            item_name="",
+            turns=(
+                {
+                    "issue_type": "delay",
+                    "complaint": "order 25 minute late tha but food okay hai",
+                    "assessment": {
+                        "issue_type": "delay",
+                        "issue_confidence": 0.94,
+                    },
+                },
+                {
+                    "issue_type": "delay",
+                    "complaint": "kuch coupon milega kya",
+                    "assessment": {
+                        "issue_type": "delay",
+                        "issue_confidence": 0.94,
+                        "requested_resolution": "coupon",
+                        "requested_resolution_confidence": 0.9,
+                    },
+                },
+            ),
+            expected_terminal_action="info",
+            expected_terminal_issue_type="delay",
+        ),
+        ConversationCase(
+            case_id="portion-followup-retains-issue",
+            order_id="ORD005",
+            item_name="Mini Punjabi Aloo Samosa",
+            turns=(
+                {
+                    "issue_type": "portion_size",
+                    "complaint": "Mini Punjabi Aloo Samosa quantity bahut kam thi box half empty tha",
+                    "assessment": {
+                        "issue_type": "portion_size",
+                        "issue_confidence": 0.95,
+                        "active_item_name": "Mini Punjabi Aloo Samosa",
+                    },
+                },
+                {
+                    "issue_type": "portion_size",
+                    "complaint": "coupon ya refund kya milega",
+                    "assessment": {
+                        "issue_type": "portion_size",
+                        "issue_confidence": 0.95,
+                        "active_item_name": "Mini Punjabi Aloo Samosa",
+                        "requested_resolution": "refund",
+                        "requested_resolution_confidence": 0.9,
+                    },
+                },
+            ),
+            expected_terminal_action="info",
+            expected_message_bits=("coupon",),
+            expected_terminal_issue_type="portion_size",
+        ),
+        ConversationCase(
+            case_id="foreign-object-safety-review",
+            order_id="ORD003",
+            item_name="Classic Maggi",
+            turns=(
+                {
+                    "issue_type": "foreign_object",
+                    "complaint": "Classic Maggi me plastic ka piece mila",
+                    "assessment": {
+                        "issue_type": "foreign_object",
+                        "issue_confidence": 0.97,
+                        "active_item_name": "Classic Maggi",
+                        "issue_severity": "high",
+                        "visual_evidence_useful": True,
+                    },
+                },
+                {
+                    "issue_type": "foreign_object",
+                    "complaint": "please review this",
+                    "assessment": {
+                        "issue_type": "foreign_object",
+                        "issue_confidence": 0.97,
+                        "active_item_name": "Classic Maggi",
+                        "issue_severity": "high",
+                        "recommended_next_step": "escalate",
+                    },
+                },
+            ),
+            expected_terminal_action="escalate",
+            expected_message_bits=("review",),
+            expected_terminal_issue_type="foreign_object",
+        ),
+        ConversationCase(
+            case_id="dietary-mismatch-sensitive-path",
+            order_id="ORD005",
+            item_name="Veg Alfredo Penne",
+            turns=(
+                {
+                    "issue_type": "foreign_object",
+                    "complaint": "Veg Alfredo Penne me chicken piece mila",
+                    "assessment": {
+                        "issue_type": "foreign_object",
+                        "issue_confidence": 0.96,
+                        "active_item_name": "Veg Alfredo Penne",
+                        "issue_severity": "high",
+                        "visual_evidence_useful": True,
+                    },
+                },
+            ),
+            expected_terminal_action="info",
+            expected_message_bits=("seriously",),
+            expected_terminal_issue_type="foreign_object",
+        ),
+        ConversationCase(
+            case_id="harmless-ingredient-confusion-does-not-refund",
+            order_id="ORD001",
+            item_name="Butter Chicken Rice Bowl",
+            turns=(
+                {
+                    "issue_type": "quality",
+                    "complaint": "Butter Chicken Rice Bowl me vegetable tha",
+                    "assessment": {
+                        "issue_type": "quality",
+                        "issue_confidence": 0.9,
+                        "active_item_name": "Butter Chicken Rice Bowl",
+                        "clarification_needed": False,
+                    },
+                },
+            ),
+            expected_terminal_action="info",
+            expected_terminal_issue_type="quality",
+        ),
+        ConversationCase(
+            case_id="coupon-rejection-escalates-not-infinite-offers",
+            order_id="ORD003",
+            item_name="Classic Maggi",
+            turns=(
+                {
+                    "issue_type": "quality",
+                    "complaint": "Classic Maggi quality bilkul kharab thi refund chahiye",
+                    "assessment": {
+                        "issue_type": "quality",
+                        "issue_confidence": 0.94,
+                        "active_item_name": "Classic Maggi",
+                        "requested_resolution": "refund",
+                        "requested_resolution_confidence": 0.93,
+                    },
+                },
+                {
+                    "issue_type": "quality",
+                    "complaint": "coupon nahi chahiye refund do",
+                    "assessment": {
+                        "issue_type": "quality",
+                        "issue_confidence": 0.94,
+                        "active_item_name": "Classic Maggi",
+                        "requested_resolution": "refund",
+                        "requested_resolution_confidence": 0.93,
+                        "turn_act": "reject",
+                        "turn_act_confidence": 0.92,
+                    },
+                },
+                {
+                    "issue_type": "quality",
+                    "complaint": "nahi refund hi chahiye",
+                    "assessment": {
+                        "issue_type": "quality",
+                        "issue_confidence": 0.94,
+                        "active_item_name": "Classic Maggi",
+                        "requested_resolution": "refund",
+                        "requested_resolution_confidence": 0.93,
+                        "turn_act": "reject",
+                        "turn_act_confidence": 0.92,
+                    },
+                },
+            ),
+            expected_terminal_action="escalate",
+            expected_message_bits=("review",),
+            expected_terminal_issue_type="quality",
+        ),
+        ConversationCase(
+            case_id="replacement-request-checks-economics",
+            order_id="ORD002",
+            item_name="Grilled Paneer Club Sandwich",
+            turns=(
+                {
+                    "issue_type": "quality",
+                    "complaint": "Grilled Paneer Club Sandwich soggy tha fresh bhej do",
+                    "assessment": {
+                        "issue_type": "quality",
+                        "issue_confidence": 0.9,
+                        "active_item_name": "Grilled Paneer Club Sandwich",
+                        "requested_resolution": "replacement",
+                        "requested_resolution_confidence": 0.93,
+                    },
+                },
+                {
+                    "issue_type": "quality",
+                    "complaint": "same item fresh bhej do",
+                    "assessment": {
+                        "issue_type": "quality",
+                        "issue_confidence": 0.9,
+                        "active_item_name": "Grilled Paneer Club Sandwich",
+                        "requested_resolution": "replacement",
+                        "requested_resolution_confidence": 0.93,
+                        "turn_act": "reject",
+                        "turn_act_confidence": 0.9,
+                    },
+                },
+            ),
+            expected_terminal_action="info",
+            expected_message_bits=("coupon",),
+            expected_terminal_issue_type="quality",
+        ),
+        ConversationCase(
+            case_id="refund-status-does-not-reopen-quality",
+            order_id="ORD002",
+            item_name="Classic Cold Coffee",
+            turns=(
+                {
+                    "issue_type": "quality",
+                    "complaint": "Classic Cold Coffee bahut meetha tha",
+                    "assessment": {
+                        "issue_type": "quality",
+                        "issue_confidence": 0.91,
+                        "active_item_name": "Classic Cold Coffee",
+                    },
+                },
+                {
+                    "issue_type": "info_query",
+                    "complaint": "refund kab aayega",
+                    "assessment": {
+                        "issue_type": "info_query",
+                        "issue_confidence": 0.95,
+                        "info_query": "status",
+                        "info_query_confidence": 0.95,
+                        "turn_act": "ask_status",
+                        "turn_act_confidence": 0.95,
+                    },
+                },
+            ),
+            expected_terminal_action="info",
+            expected_message_bits=("delivered",),
+            expected_terminal_issue_type="info_query",
+        ),
+        ConversationCase(
+            case_id="picker-confirmation-continues-selected-flow",
+            order_id="ORD004",
+            item_name="Roohafza Sharbat",
+            turns=(
+                {
+                    "issue_type": "spill_leak",
+                    "complaint": "Roohafza Sharbat has spillage issue",
+                    "assessment": {
+                        "issue_type": "spill_leak",
+                        "issue_confidence": 0.95,
+                        "active_item_name": "Roohafza Sharbat",
+                        "visual_evidence_useful": True,
+                    },
+                },
+                {
+                    "issue_type": "spill_leak",
+                    "complaint": "haan same issue hai",
+                    "assessment": {
+                        "issue_type": "spill_leak",
+                        "issue_confidence": 0.9,
+                        "active_item_name": "Roohafza Sharbat",
+                        "turn_act": "confirm",
+                        "turn_act_confidence": 0.9,
+                    },
+                },
+            ),
+            expected_terminal_action="info",
+            expected_terminal_issue_type="spill_leak",
+        ),
+        ConversationCase(
+            case_id="closed-case-reopen-escalates-with-context",
+            order_id="ORD003",
+            item_name="Classic Maggi",
+            turns=(
+                {
+                    "issue_type": "quality",
+                    "complaint": "Classic Maggi soggy thi refund chahiye",
+                    "assessment": {
+                        "issue_type": "quality",
+                        "issue_confidence": 0.94,
+                        "active_item_name": "Classic Maggi",
+                        "requested_resolution": "refund",
+                        "requested_resolution_confidence": 0.93,
+                    },
+                },
+                {
+                    "issue_type": "quality",
+                    "complaint": "coupon nahi chahiye refund do",
+                    "assessment": {
+                        "issue_type": "quality",
+                        "issue_confidence": 0.94,
+                        "active_item_name": "Classic Maggi",
+                        "requested_resolution": "refund",
+                        "requested_resolution_confidence": 0.93,
+                        "turn_act": "reject",
+                        "turn_act_confidence": 0.92,
+                    },
+                },
+                {
+                    "issue_type": "quality",
+                    "complaint": "issue close kyun kar diya problem solve nahi hua",
+                    "assessment": {
+                        "issue_type": "quality",
+                        "issue_confidence": 0.94,
+                        "active_item_name": "Classic Maggi",
+                        "recommended_next_step": "escalate",
+                    },
+                },
+            ),
+            expected_terminal_action="escalate",
+            expected_message_bits=("review",),
+            expected_terminal_issue_type="quality",
+        ),
+        ConversationCase(
+            case_id="delivery-partner-non-delivery-not-food-quality",
+            order_id="ORD001",
+            item_name="item",
+            turns=(
+                {
+                    "issue_type": "missing_item",
+                    "complaint": "rider ne bola item nahi hai but app delivered dikha raha hai",
+                    "assessment": {
+                        "issue_type": "missing_item",
+                        "issue_confidence": 0.9,
+                        "fault_hint": "delivery",
+                    },
+                },
+            ),
+            expected_terminal_action="info",
+            expected_terminal_issue_type="missing_item",
+        ),
+        ConversationCase(
+            case_id="payment-failed-not-food-complaint",
+            order_id="ORD001",
+            item_name="",
+            turns=(
+                {
+                    "issue_type": "info_query",
+                    "complaint": "payment cut gaya but order fail ho gaya",
+                    "assessment": {
+                        "issue_type": "info_query",
+                        "issue_confidence": 0.9,
+                        "info_query": "status",
+                        "info_query_confidence": 0.9,
+                    },
+                },
+            ),
+            expected_terminal_action="info",
+            expected_message_bits=("delivered",),
+            expected_terminal_issue_type="info_query",
         ),
     ]
 
@@ -419,6 +1013,7 @@ def test_generated_behavioral_conversations_reach_expected_terminal_action(case:
             photo_url=turn.get("photo_url"),
             photo_valid=turn.get("photo_valid"),
             assessment=turn.get("assessment"),
+            trust_score=turn.get("trust_score"),
         )
 
     assert result is not None
@@ -426,6 +1021,10 @@ def test_generated_behavioral_conversations_reach_expected_terminal_action(case:
     assert style_warnings(result["message"]) == []
     for bit in case.expected_message_bits:
         assert bit.lower() in result["message"].lower()
+    if case.expected_terminal_issue_type:
+        assert _result_issue_type(result, session_id) == case.expected_terminal_issue_type
+    if case.expected_max_amount is not None:
+        assert float(result.get("amount") or 0.0) <= case.expected_max_amount
 
 
 @pytest.mark.parametrize("order_id", sorted(ORDER_DATABASE.keys()))
