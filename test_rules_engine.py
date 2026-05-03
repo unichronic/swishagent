@@ -1,0 +1,1997 @@
+from rules import Rules, clear_session, get_session, get_session_state, mark_photo_provided, session_has_photo
+
+
+def _base_context():
+    return {
+        "kitchen": {
+            "quality_out": "fair",
+            "prep_time_mins": 6,
+            "temperature_check": "warm",
+        },
+        "fleet": {
+            "delay_mins": 4,
+            "traffic_flag": False,
+        },
+        "trust": {
+            "score": 92,
+            "total_orders": 18,
+        },
+        "order_details": {
+            "total_amount": 222,
+        },
+        "order_items": {
+            "items": [
+                {"name": "Classic Maggi", "price": 79},
+                {"name": "Cold Coffee", "price": 120},
+            ]
+        },
+    }
+
+
+def _run_turn(session_id: str, complaint: str, order_value: float = 222, photo_url=None, photo_valid=None):
+    history = get_session(session_id)
+    history.append({"role": "user", "content": complaint})
+    if photo_url:
+        mark_photo_provided(session_id)
+    ctx = _base_context()
+    result = Rules.resolve(
+        complaint=complaint,
+        conversation_history=history,
+        order_value=order_value,
+        trust_score=ctx["trust"]["score"],
+        kitchen=ctx["kitchen"],
+        fleet=ctx["fleet"],
+        trust=ctx["trust"],
+        order_details=ctx["order_details"],
+        order_items=ctx["order_items"],
+        photo_url=photo_url,
+        photo_valid=photo_valid,
+        photo_in_session=session_has_photo(session_id),
+        session_id=session_id,
+    )
+    history.append({"role": "bot", "content": result["message"]})
+    return result
+
+
+def test_refund_flow_is_deterministic():
+    session_id = "test:refund"
+    clear_session(session_id)
+
+    first = _run_turn(session_id, "there was plastic in my maggi")
+    assert first["action"] == "info"
+    assert "coupon" not in first["message"].lower()
+
+    second = _run_turn(session_id, "i want a refund", photo_url="https://example.com/proof.jpg", photo_valid=True)
+    assert second["action"] == "info"
+    assert "coupon" in second["message"].lower()
+
+    third = _run_turn(session_id, "no i want refund")
+    assert third["action"] == "info"
+    assert "25%" in third["message"]
+
+    fourth = _run_turn(session_id, "50%")
+    assert fourth["action"] == "refund"
+    assert fourth["amount"] == 111
+
+
+def test_high_value_low_trust_refund_is_forced_toward_replacement():
+    session_id = "test:refund-to-replacement"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["trust"]["score"] = 72
+    ctx["order_items"] = {"items": [{"name": "Veg Pink Sauce Pasta", "price": 219}]}
+
+    responses = []
+    for msg in ["the pasta was bad", "i want a refund", "no i need a refund", "full"]:
+        history.append({"role": "user", "content": msg})
+        result = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            order_value=756,
+            trust_score=72,
+            kitchen=ctx["kitchen"],
+            fleet=ctx["fleet"],
+            trust=ctx["trust"],
+            order_details={"total_amount": 756},
+            order_items=ctx["order_items"],
+            session_id=session_id,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+        responses.append(result)
+
+    assert result["action"] == "info"
+    assert "can't lock in a refund" in responses[2]["message"].lower()
+    assert "can't lock in a refund" in responses[3]["message"].lower()
+    assert "fresh veg pink sauce pasta" in responses[2]["message"].lower()
+
+
+def test_low_value_refund_request_stays_on_refund_path_when_more_economical():
+    session_id = "test:low-value-refund-economical"
+    clear_session(session_id)
+
+    first = _run_turn(session_id, "i got the wrong item", order_value=168)
+    assert first["action"] == "info"
+    second = _run_turn(session_id, "i want a refund", order_value=168, photo_url="https://example.com/proof.jpg", photo_valid=True)
+    assert second["action"] == "info"
+    third = _run_turn(session_id, "no i need a refund", order_value=168)
+    assert third["action"] == "info"
+    assert "25%" in third["message"].lower()
+
+
+def test_high_value_refund_request_can_be_steered_to_replacement_when_cheaper():
+    session_id = "test:high-value-replacement-economical"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["trust"]["score"] = 92
+    ctx["order_items"] = {"items": [{"name": "Veg Pink Sauce Pasta", "price": 219}]}
+
+    history.append({"role": "user", "content": "the pasta was bad"})
+    first = Rules.resolve(
+        complaint="the pasta was bad",
+        conversation_history=history,
+        order_value=756,
+        trust_score=92,
+        kitchen=ctx["kitchen"],
+        fleet=ctx["fleet"],
+        trust=ctx["trust"],
+        order_details={"total_amount": 756},
+        order_items=ctx["order_items"],
+        session_id=session_id,
+    )
+    history.append({"role": "bot", "content": first["message"]})
+
+    history.append({"role": "user", "content": "i want a refund"})
+    second = Rules.resolve(
+        complaint="i want a refund",
+        conversation_history=history,
+        order_value=756,
+        trust_score=92,
+        kitchen=ctx["kitchen"],
+        fleet=ctx["fleet"],
+        trust=ctx["trust"],
+        order_details={"total_amount": 756},
+        order_items=ctx["order_items"],
+        session_id=session_id,
+    )
+    history.append({"role": "bot", "content": second["message"]})
+
+    history.append({"role": "user", "content": "no i need a refund"})
+    third = Rules.resolve(
+        complaint="no i need a refund",
+        conversation_history=history,
+        order_value=756,
+        trust_score=92,
+        kitchen=ctx["kitchen"],
+        fleet=ctx["fleet"],
+        trust=ctx["trust"],
+        order_details={"total_amount": 756},
+        order_items=ctx["order_items"],
+        session_id=session_id,
+    )
+    assert third["action"] == "info"
+    assert "fresh veg pink sauce pasta" in third["message"].lower()
+
+
+def test_replacement_flow_is_deterministic():
+    session_id = "test:replacement"
+    clear_session(session_id)
+
+    _run_turn(session_id, "coffee was too sweet")
+    second = _run_turn(session_id, "i want a replacement")
+    assert second["action"] == "info"
+    assert "coupon" in second["message"].lower()
+
+    third = _run_turn(session_id, "no i want another one")
+    assert third["action"] == "info"
+    assert "fresh" in third["message"].lower()
+
+    fourth = _run_turn(session_id, "yes same items")
+    assert fourth["action"] == "replacement"
+    assert "cold coffee" in fourth["message"].lower()
+    assert "that wasn't right" not in fourth["message"].lower()
+
+
+def test_unverifiable_replacement_request_pushes_coupon_then_escalates_review():
+    session_id = "test:replacement-needs-review"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["kitchen"] = {"quality_out": "good", "prep_time_mins": 12, "temperature_check": "hot"}
+    ctx["fleet"] = {"delay_mins": 1, "traffic_flag": False}
+    ctx["order_items"] = {"items": [{"name": "Peri Peri French Fries", "price": 209}]}
+
+    turns = [
+        "the fries were less in quantity",
+        "i want a replacement",
+        "no i need another fries",
+        "still no i need another one",
+        "replacement only",
+    ]
+    outputs = []
+    for msg in turns:
+        history.append({"role": "user", "content": msg})
+        result = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            order_value=209,
+            trust_score=92,
+            kitchen=ctx["kitchen"],
+            fleet=ctx["fleet"],
+            trust=ctx["trust"],
+            order_details={"total_amount": 209},
+            order_items=ctx["order_items"],
+            session_id=session_id,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+        outputs.append(result)
+
+    assert "₹42" in outputs[1]["message"]
+    assert outputs[2]["action"] == "info"
+    assert "coupon" in outputs[2]["message"].lower()
+    assert outputs[4]["action"] == "escalate"
+    assert "review" in outputs[4]["message"].lower()
+
+
+def test_invalid_live_capture_escalates_without_compensation():
+    session_id = "test:invalid-capture-review"
+    clear_session(session_id)
+
+    _run_turn(session_id, "i want a replacement because the packaging was crushed and leaking", order_value=650)
+    result = _run_turn(
+        session_id,
+        "here is the video",
+        order_value=650,
+        photo_url="https://example.com/capture.jpg",
+        photo_valid=False,
+    )
+    assert result["action"] == "escalate"
+    assert "review" in result["message"].lower()
+
+
+def test_non_serious_refund_escalates_after_coupon_instead_of_auto_refund():
+    session_id = "test:non-serious-refund-review"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["kitchen"] = {"quality_out": "good", "prep_time_mins": 12, "temperature_check": "hot"}
+    ctx["fleet"] = {"delay_mins": 1, "traffic_flag": False}
+    ctx["order_items"] = {"items": [{"name": "Peri Peri French Fries", "price": 209}]}
+
+    for msg in ["the fries were less in quantity", "i want a refund"]:
+        history.append({"role": "user", "content": msg})
+        result = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            order_value=478,
+            trust_score=92,
+            kitchen=ctx["kitchen"],
+            fleet=ctx["fleet"],
+            trust=ctx["trust"],
+            order_details={"total_amount": 478},
+            order_items=ctx["order_items"],
+            session_id=session_id,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+
+    history.append({"role": "user", "content": "no i need a refund"})
+    first_push = Rules.resolve(
+        complaint="no i need a refund",
+        conversation_history=history,
+        order_value=478,
+        trust_score=92,
+        kitchen=ctx["kitchen"],
+        fleet=ctx["fleet"],
+        trust=ctx["trust"],
+        order_details={"total_amount": 478},
+        order_items=ctx["order_items"],
+        session_id=session_id,
+    )
+    history.append({"role": "bot", "content": first_push["message"]})
+    assert first_push["action"] == "info"
+    assert "coupon" in first_push["message"].lower()
+
+    history.append({"role": "user", "content": "still no i need a refund"})
+    result = Rules.resolve(
+        complaint="still no i need a refund",
+        conversation_history=history,
+        order_value=478,
+        trust_score=92,
+        kitchen=ctx["kitchen"],
+        fleet=ctx["fleet"],
+        trust=ctx["trust"],
+        order_details={"total_amount": 478},
+        order_items=ctx["order_items"],
+        session_id=session_id,
+    )
+    assert result["action"] == "escalate"
+    assert "refund" in result["message"].lower()
+    assert "review" in result["message"].lower()
+
+
+def test_portion_size_refund_path_uses_smarter_economic_preference():
+    session_id = "test:portion-refund-smart-econ"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["kitchen"] = {"quality_out": "good", "prep_time_mins": 10, "temperature_check": "hot"}
+    ctx["fleet"] = {"delay_mins": 2, "traffic_flag": False}
+    ctx["order_items"] = {"items": [{"name": "Peri Peri French Fries", "price": 209}]}
+
+    for msg in ["peri peri french fries were less in quantity", "i want a refund", "no i need a refund"]:
+        history.append({"role": "user", "content": msg})
+        result = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            order_value=478,
+            trust_score=92,
+            kitchen=ctx["kitchen"],
+            fleet=ctx["fleet"],
+            trust=ctx["trust"],
+            order_details={"total_amount": 478},
+            order_items=ctx["order_items"],
+            session_id=session_id,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+
+    assert result["action"] == "info"
+    assert "coupon" in result["message"].lower()
+
+    history.append({"role": "user", "content": "still no i need a refund"})
+    result = Rules.resolve(
+        complaint="still no i need a refund",
+        conversation_history=history,
+        order_value=478,
+        trust_score=92,
+        kitchen=ctx["kitchen"],
+        fleet=ctx["fleet"],
+        trust=ctx["trust"],
+        order_details={"total_amount": 478},
+        order_items=ctx["order_items"],
+        session_id=session_id,
+    )
+    assert result["action"] == "escalate"
+    assert "review" in result["message"].lower()
+    assert "fresh peri peri french fries" not in result["message"].lower()
+
+
+def test_too_less_phrase_is_understood_on_first_turn():
+    session_id = "test:too-less-first-turn"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["kitchen"] = {"quality_out": "good", "prep_time_mins": 12, "temperature_check": "hot"}
+    ctx["fleet"] = {"delay_mins": 5, "traffic_flag": False}
+    ctx["order_items"] = {"items": [{"name": "Peri Peri French Fries", "price": 209}]}
+
+    history.append({"role": "user", "content": "the fries were too less"})
+    result = Rules.resolve(
+        complaint="the fries were too less",
+        conversation_history=history,
+        order_value=478,
+        trust_score=82,
+        kitchen=ctx["kitchen"],
+        fleet=ctx["fleet"],
+        trust=ctx["trust"],
+        order_details={"total_amount": 478},
+        order_items=ctx["order_items"],
+        session_id=session_id,
+    )
+
+    assert result["_debug"]["issue_type"] == "portion_size"
+    assert "portion size" in result["message"].lower() or "light for what you paid" in result["message"].lower()
+
+
+def test_non_veg_in_veg_with_valid_photo_moves_to_real_refund_path():
+    session_id = "test:dietary-violation-refund"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["trust"]["score"] = 82
+    ctx["kitchen"] = {"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"}
+    ctx["fleet"] = {"delay_mins": 15, "traffic_flag": True}
+    ctx["order_items"] = {"items": [{"name": "Veg Pink Sauce Pasta", "price": 219}]}
+
+    turns = [
+        ("there was a piece of chick in themy veg pasta", None, None),
+        ("CAN I get a refund", None, None),
+        ("photo attached", "https://example.com/photo.jpg", True),
+        ("no i need a refund", None, None),
+    ]
+    outputs = []
+    for complaint, photo_url, photo_valid in turns:
+        if photo_url:
+            mark_photo_provided(session_id)
+        history.append({"role": "user", "content": complaint})
+        result = Rules.resolve(
+            complaint=complaint,
+            conversation_history=history,
+            order_value=756,
+            trust_score=82,
+            kitchen=ctx["kitchen"],
+            fleet=ctx["fleet"],
+            trust=ctx["trust"],
+            order_details={"total_amount": 756},
+            order_items=ctx["order_items"],
+            photo_url=photo_url,
+            photo_valid=photo_valid,
+            photo_in_session=session_has_photo(session_id),
+            session_id=session_id,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+        outputs.append(result)
+
+    assert outputs[0]["_debug"]["issue_type"] == "foreign_object"
+    assert outputs[1]["action"] == "live_capture"
+    assert outputs[2]["action"] == "info"
+    assert "coupon" in outputs[2]["message"].lower()
+    assert outputs[3]["action"] == "info"
+    assert "25%" in outputs[3]["message"]
+
+
+def test_truncated_non_veg_in_veg_phrase_is_detected_as_serious_dietary_violation():
+    session_id = "test:dietary-violation-typo"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "there was a piece of chick in themy veg pasta"})
+    result = Rules.resolve(
+        complaint="there was a piece of chick in themy veg pasta",
+        conversation_history=history,
+        order_value=756,
+        trust_score=82,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 82, "total_orders": 16},
+        order_details={"total_amount": 756},
+        order_items={"items": [{"name": "Veg Pink Sauce Pasta", "price": 219}]},
+        session_id=session_id,
+    )
+
+    assert result["_debug"]["issue_type"] == "foreign_object"
+    assert "safety" in result["message"].lower() or "shouldn't have happened" in result["message"].lower()
+
+
+def test_llm_economic_preference_can_override_generic_cost_formula_when_valid():
+    session_id = "test:llm-economic-preference"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["kitchen"] = {"quality_out": "good", "prep_time_mins": 10, "temperature_check": "hot"}
+    ctx["fleet"] = {"delay_mins": 2, "traffic_flag": False}
+    ctx["order_items"] = {"items": [{"name": "Peri Peri French Fries", "price": 209}]}
+
+    history.append({"role": "user", "content": "the fries were less in quantity"})
+    first = Rules.resolve(
+        complaint="the fries were less in quantity",
+        conversation_history=history,
+        order_value=478,
+        trust_score=92,
+        kitchen=ctx["kitchen"],
+        fleet=ctx["fleet"],
+        trust=ctx["trust"],
+        order_details={"total_amount": 478},
+        order_items=ctx["order_items"],
+        session_id=session_id,
+        assessment={
+            "issue_type": "portion_size",
+            "issue_confidence": 0.9,
+            "issue_severity": "low",
+            "economic_preference": "refund",
+            "economic_confidence": 0.88,
+        },
+    )
+    history.append({"role": "bot", "content": first["message"]})
+
+    history.append({"role": "user", "content": "i want a refund"})
+    second = Rules.resolve(
+        complaint="i want a refund",
+        conversation_history=history,
+        order_value=478,
+        trust_score=92,
+        kitchen=ctx["kitchen"],
+        fleet=ctx["fleet"],
+        trust=ctx["trust"],
+        order_details={"total_amount": 478},
+        order_items=ctx["order_items"],
+        session_id=session_id,
+            assessment={
+                "requested_resolution": "refund",
+                "requested_resolution_confidence": 0.91,
+                "economic_preference": "refund",
+                "economic_confidence": 0.88,
+            },
+    )
+    history.append({"role": "bot", "content": second["message"]})
+
+    history.append({"role": "user", "content": "no i need a refund"})
+    third = Rules.resolve(
+        complaint="no i need a refund",
+        conversation_history=history,
+        order_value=478,
+        trust_score=92,
+        kitchen=ctx["kitchen"],
+        fleet=ctx["fleet"],
+        trust=ctx["trust"],
+        order_details={"total_amount": 478},
+        order_items=ctx["order_items"],
+        session_id=session_id,
+            assessment={
+                "requested_resolution": "refund",
+                "requested_resolution_confidence": 0.91,
+                "economic_preference": "refund",
+                "economic_confidence": 0.88,
+            },
+    )
+
+    assert third["action"] == "info"
+    assert "coupon" in third["message"].lower()
+
+
+def test_replacement_request_does_not_mention_refund_when_user_wants_replacement():
+    session_id = "test:replacement-no-refund-mention"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["trust"]["score"] = 85
+    ctx["order_items"] = {"items": [{"name": "Veg Pink Sauce Pasta", "price": 219}]}
+
+    for msg in ["the pasta was too dry", "can i get a replacement order?", "no i need another pasta"]:
+        history.append({"role": "user", "content": msg})
+        result = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            order_value=756,
+            trust_score=85,
+            kitchen={"quality_out": "fair", "prep_time_mins": 20, "temperature_check": "hot"},
+            fleet={"delay_mins": 4, "traffic_flag": False},
+            trust=ctx["trust"],
+            order_details={"total_amount": 756},
+            order_items=ctx["order_items"],
+            session_id=session_id,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+
+    assert result["action"] == "info"
+    assert "refund" not in result["message"].lower()
+    assert "fresh veg pink sauce pasta" in result["message"].lower()
+
+
+def test_high_value_complaint_requests_photo():
+    session_id = "test:photo"
+    clear_session(session_id)
+
+    result = _run_turn(session_id, "i want a refund because the packaging was crushed and leaking", order_value=650)
+    assert result["action"] == "live_capture"
+    assert "photo" in result["message"].lower()
+
+
+def test_low_trust_refund_escalates():
+    session_id = "test:lowtrust"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["trust"]["score"] = 45
+
+    history.append({"role": "user", "content": "i want refund"})
+    first = Rules.resolve(
+        complaint="i want refund",
+        conversation_history=history,
+        order_value=222,
+        trust_score=45,
+        kitchen=ctx["kitchen"],
+        fleet=ctx["fleet"],
+        trust=ctx["trust"],
+        order_details=ctx["order_details"],
+        order_items=ctx["order_items"],
+        session_id=session_id,
+    )
+    history.append({"role": "bot", "content": first["message"]})
+
+    history.append({"role": "user", "content": "no refund"})
+    second = Rules.resolve(
+        complaint="no refund",
+        conversation_history=history,
+        order_value=222,
+        trust_score=45,
+        kitchen=ctx["kitchen"],
+        fleet=ctx["fleet"],
+        trust=ctx["trust"],
+        order_details=ctx["order_details"],
+        order_items=ctx["order_items"],
+        session_id=session_id,
+    )
+    history.append({"role": "bot", "content": second["message"]})
+
+    assert second["action"] == "escalate"
+
+
+def test_order_items_question_is_not_treated_as_complaint():
+    session_id = "test:info-query"
+    clear_session(session_id)
+
+    result = _run_turn(session_id, "what were the items in this order?", order_value=222)
+    assert result["action"] == "info"
+    assert "butter" not in result["message"].lower()
+    assert "classic maggi" in result["message"].lower() or "cold coffee" in result["message"].lower()
+
+
+def test_high_value_first_complaint_does_not_force_photo_without_comp_request():
+    session_id = "test:high-value-no-photo-first-turn"
+    clear_session(session_id)
+
+    result = _run_turn(session_id, "the coffee was too bitter", order_value=650)
+    assert result["action"] == "info"
+    assert "photo" not in result["message"].lower()
+
+
+def test_replacement_flow_keeps_original_item_when_user_stops_naming_it():
+    session_id = "test:item-memory"
+    clear_session(session_id)
+
+    _run_turn(session_id, "the maggi came too soggy", order_value=168)
+    _run_turn(session_id, "can you get me a replacement order?", order_value=168)
+    third = _run_turn(session_id, "no i need a full replacement order", order_value=168)
+    assert "classic maggi" in third["message"].lower()
+
+    fourth = _run_turn(session_id, "yes", order_value=168)
+    assert fourth["action"] == "replacement"
+    assert "classic maggi" in fourth["message"].lower()
+
+
+def test_followup_messages_do_not_repeat_same_opener():
+    session_id = "test:human-tone"
+    clear_session(session_id)
+
+    first = _run_turn(session_id, "the maggi came too soggy", order_value=168)
+    second = _run_turn(session_id, "but it was still soggy when it arrived", order_value=168)
+
+    assert first["action"] == "info"
+    assert second["action"] == "info"
+    assert first["message"] != second["message"]
+
+
+def test_typo_replacement_request_is_understood():
+    session_id = "test:fuzzy-replacement"
+    clear_session(session_id)
+
+    _run_turn(session_id, "the maggi came soggy", order_value=168)
+    result = _run_turn(session_id, "can i get a replcemnt", order_value=168)
+    assert result["action"] == "info"
+    assert "coupon" in result["message"].lower()
+
+
+def test_eta_after_replacement_uses_replacement_state():
+    session_id = "test:replacement-eta"
+    clear_session(session_id)
+
+    _run_turn(session_id, "the maggi came soggy", order_value=168)
+    _run_turn(session_id, "i want a replacement", order_value=168)
+    _run_turn(session_id, "no i need another maggi", order_value=168)
+    replacement = _run_turn(session_id, "yes", order_value=168)
+    assert replacement["action"] == "replacement"
+
+    eta = _run_turn(session_id, "in how long will i get it?", order_value=168)
+    assert eta["action"] == "info"
+    assert "15 to 20" in eta["message"] or "eta" in eta["message"].lower() or "update in-app" in eta["message"].lower()
+
+
+def test_high_value_temperature_replacement_does_not_force_photo():
+    session_id = "test:no-photo-for-cold-drink"
+    clear_session(session_id)
+
+    _run_turn(session_id, "the roohafza isnt cold", order_value=756)
+    result = _run_turn(session_id, "can i get a replacement?", order_value=756)
+    assert result["action"] == "info"
+    assert "coupon" in result["message"].lower()
+
+
+def test_high_value_non_visual_refund_request_does_not_force_photo():
+    session_id = "test:no-photo-for-non-visual-high-value"
+    clear_session(session_id)
+
+    _run_turn(session_id, "the biryani tasted terrible", order_value=820)
+    result = _run_turn(session_id, "i want a refund", order_value=820)
+    assert result["action"] == "info"
+    assert "coupon" in result["message"].lower()
+
+
+def test_assurance_after_replacement_is_grounded_and_english():
+    session_id = "test:assurance"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["fleet"] = {"delay_mins": 15, "traffic_flag": True}
+    ctx["order_items"] = {"items": [{"name": "Roohafza Sharbat", "price": 79}]}
+
+    for msg in [
+        "the roohafza isnt cold",
+        "i want a replacement",
+        "no i need another roohafza",
+        "yes",
+        "are you sure it will be cold this time?",
+    ]:
+        history.append({"role": "user", "content": msg})
+        result = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            order_value=756,
+            trust_score=92,
+            kitchen=ctx["kitchen"],
+            fleet=ctx["fleet"],
+            trust=ctx["trust"],
+            order_details={"total_amount": 756},
+            order_items=ctx["order_items"],
+            session_id=session_id,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+
+    assert result["action"] == "info"
+    assert "kitchen" in result["message"].lower()
+    assert "promise" in result["message"].lower()
+    assert "bhai" not in result["message"].lower()
+
+
+def test_spill_complaint_does_not_default_to_kitchen_when_logs_point_to_transit():
+    session_id = "test:spill-transit"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "the salad was all spilled"})
+    result = Rules.resolve(
+        complaint="the salad was all spilled",
+        conversation_history=history,
+        order_value=627,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 15, "temperature_check": "cold"},
+        fleet={"delay_mins": 8, "traffic_flag": True},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 627},
+        order_items={"items": [{"name": "Caesar Salad", "price": 259}]},
+        session_id=session_id,
+    )
+    assert result["action"] == "info"
+    assert "transit" in result["message"].lower() or "delivery" in result["message"].lower()
+    assert "kitchen miss" not in result["message"].lower()
+
+
+def test_good_logs_quality_complaint_stays_honest_when_fault_is_unclear():
+    session_id = "test:unclear-quality"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "the pasta tasted terrible"})
+    result = Rules.resolve(
+        complaint="the pasta tasted terrible",
+        conversation_history=history,
+        order_value=219,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 12, "temperature_check": "hot"},
+        fleet={"delay_mins": 2, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 219},
+        order_items={"items": [{"name": "Veg Pink Sauce Pasta", "price": 219}]},
+        session_id=session_id,
+    )
+    assert result["action"] == "info"
+    assert "don't point" in result["message"].lower() or "don't" in result["message"].lower()
+    assert "kitchen miss" not in result["message"].lower()
+
+
+def test_temperature_complaint_can_blame_delivery_when_logs_support_it():
+    session_id = "test:temp-delivery"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "the coffee was warm"})
+    result = Rules.resolve(
+        complaint="the coffee was warm",
+        conversation_history=history,
+        order_value=159,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 11, "temperature_check": "cold"},
+        fleet={"delay_mins": 16, "traffic_flag": True},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 159},
+        order_items={"items": [{"name": "Classic Cold Coffee", "price": 159}]},
+        session_id=session_id,
+    )
+    assert result["action"] == "info"
+    assert "delivery delay" in result["message"].lower() or "delivery" in result["message"].lower()
+
+
+def test_wrong_item_refund_request_requires_visual_evidence_then_returns_to_coupon_flow():
+    session_id = "test:wrong-item-coverage"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    order_items = {"items": [{"name": "Veg Burger", "price": 180}, {"name": "Fries", "price": 80}]}
+
+    turns = [
+        ("i got the wrong item", None, None, False),
+        ("i want a refund", None, None, False),
+        ("photo attached", "https://example.com/proof.jpg", True, True),
+    ]
+    outputs = []
+    for complaint, photo_url, photo_valid, photo_in_session in turns:
+        if photo_url:
+            mark_photo_provided(session_id)
+        history.append({"role": "user", "content": complaint})
+        result = Rules.resolve(
+            complaint=complaint,
+            conversation_history=history,
+            order_value=260,
+            trust_score=92,
+            kitchen={"quality_out": "good", "prep_time_mins": 10, "temperature_check": "hot"},
+            fleet={"delay_mins": 3, "traffic_flag": False},
+            trust={"score": 92, "total_orders": 18},
+            order_details={"total_amount": 260},
+            order_items=order_items,
+            photo_url=photo_url,
+            photo_valid=photo_valid,
+            photo_in_session=session_has_photo(session_id) or photo_in_session,
+            session_id=session_id,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+        outputs.append(result)
+
+    assert outputs[0]["_debug"]["issue_type"] == "wrong_item"
+    assert outputs[1]["action"] == "live_capture"
+    assert "photo" in outputs[1]["message"].lower()
+    assert outputs[2]["action"] == "info"
+    assert "coupon" in outputs[2]["message"].lower()
+
+
+def test_missing_item_replacement_request_uses_missing_item_photo_message_then_coupon():
+    session_id = "test:missing-item-coverage"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    order_items = {"items": [{"name": "Veg Burger", "price": 180}, {"name": "Fries", "price": 80}]}
+
+    turns = [
+        ("one item was missing", None, None, False),
+        ("i need a replacement", None, None, False),
+        ("photo attached", "https://example.com/proof.jpg", True, True),
+    ]
+    outputs = []
+    for complaint, photo_url, photo_valid, photo_in_session in turns:
+        if photo_url:
+            mark_photo_provided(session_id)
+        history.append({"role": "user", "content": complaint})
+        result = Rules.resolve(
+            complaint=complaint,
+            conversation_history=history,
+            order_value=260,
+            trust_score=92,
+            kitchen={"quality_out": "good", "prep_time_mins": 10, "temperature_check": "hot"},
+            fleet={"delay_mins": 3, "traffic_flag": False},
+            trust={"score": 92, "total_orders": 18},
+            order_details={"total_amount": 260},
+            order_items=order_items,
+            photo_url=photo_url,
+            photo_valid=photo_valid,
+            photo_in_session=session_has_photo(session_id) or photo_in_session,
+            session_id=session_id,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+        outputs.append(result)
+
+    assert outputs[0]["_debug"]["issue_type"] == "missing_item"
+    assert outputs[1]["action"] == "live_capture"
+    assert "what arrived" in outputs[1]["message"].lower()
+    assert outputs[2]["action"] == "info"
+    assert "coupon" in outputs[2]["message"].lower()
+
+
+def test_damaged_replacement_request_uses_general_evidence_gated_coupon_flow():
+    session_id = "test:damaged-coverage"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    order_items = {"items": [{"name": "Noodles", "price": 220}]}
+
+    turns = [
+        ("the packaging was crushed and damaged", None, None, False),
+        ("i want a replacement", None, None, False),
+        ("photo attached", "https://example.com/proof.jpg", True, True),
+    ]
+    outputs = []
+    for complaint, photo_url, photo_valid, photo_in_session in turns:
+        if photo_url:
+            mark_photo_provided(session_id)
+        history.append({"role": "user", "content": complaint})
+        result = Rules.resolve(
+            complaint=complaint,
+            conversation_history=history,
+            order_value=320,
+            trust_score=92,
+            kitchen={"quality_out": "good", "prep_time_mins": 10, "temperature_check": "hot"},
+            fleet={"delay_mins": 12, "traffic_flag": True},
+            trust={"score": 92, "total_orders": 18},
+            order_details={"total_amount": 320},
+            order_items=order_items,
+            photo_url=photo_url,
+            photo_valid=photo_valid,
+            photo_in_session=session_has_photo(session_id) or photo_in_session,
+            session_id=session_id,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+        outputs.append(result)
+
+    assert outputs[0]["_debug"]["issue_type"] == "damaged"
+    assert "transit" in outputs[0]["message"].lower() or "delivery" in outputs[0]["message"].lower()
+    assert outputs[1]["action"] == "live_capture"
+    assert outputs[2]["action"] == "info"
+    assert "coupon" in outputs[2]["message"].lower()
+
+
+def test_delay_refund_request_stays_on_non_visual_refund_path():
+    session_id = "test:delay-coverage"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = {
+        "kitchen": {"quality_out": "good", "prep_time_mins": 10, "temperature_check": "hot"},
+        "fleet": {"delay_mins": 22, "traffic_flag": True},
+        "trust": {"score": 92, "total_orders": 18},
+        "order_details": {"total_amount": 320},
+        "order_items": {"items": [{"name": "Noodles", "price": 220}]},
+    }
+
+    outputs = []
+    for msg in ["my order is very late", "i want a refund", "no i need a refund"]:
+        history.append({"role": "user", "content": msg})
+        result = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            order_value=320,
+            trust_score=92,
+            kitchen=ctx["kitchen"],
+            fleet=ctx["fleet"],
+            trust=ctx["trust"],
+            order_details=ctx["order_details"],
+            order_items=ctx["order_items"],
+            session_id=session_id,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+        outputs.append(result)
+
+    second, third = outputs[1], outputs[2]
+
+    assert second["action"] == "info"
+    assert "coupon" in second["message"].lower()
+    assert "photo" not in second["message"].lower()
+    assert third["action"] == "info"
+    assert "25%" in third["message"]
+
+
+def test_portion_size_phrasings_are_detected_and_explained_credibly():
+    session_id = "test:portion-size-language"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "i got very less food"})
+    result = Rules.resolve(
+        complaint="i got very less food",
+        conversation_history=history,
+        order_value=219,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 12, "temperature_check": "hot"},
+        fleet={"delay_mins": 2, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 219},
+        order_items={"items": [{"name": "Veg Pink Sauce Pasta", "price": 219}]},
+        session_id=session_id,
+    )
+    assert result["action"] == "info"
+    assert "portion size" in result["message"].lower() or "under-portioned" in result["message"].lower() or "felt under-portioned" in result["message"].lower()
+    assert "logging this against the kitchen" in result["message"].lower() or "noted it" in result["message"].lower()
+
+
+def test_portion_size_not_enough_food_phrase_is_detected():
+    session_id = "test:portion-not-enough"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "this was not enough food for what i paid"})
+    result = Rules.resolve(
+        complaint="this was not enough food for what i paid",
+        conversation_history=history,
+        order_value=219,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 12, "temperature_check": "hot"},
+        fleet={"delay_mins": 2, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 219},
+        order_items={"items": [{"name": "Veg Pink Sauce Pasta", "price": 219}]},
+        session_id=session_id,
+    )
+    assert result["action"] == "info"
+    assert "verify portion size" in result["message"].lower()
+
+
+def test_portion_size_message_does_not_parrot_customer_complaint():
+    session_id = "test:portion-parrot"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "peri peri french fries were less in quantity"})
+    result = Rules.resolve(
+        complaint="peri peri french fries were less in quantity",
+        conversation_history=history,
+        order_value=478,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 10, "temperature_check": "hot"},
+        fleet={"delay_mins": 2, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 478},
+        order_items={"items": [{"name": "Peri Peri French Fries", "price": 209}]},
+        session_id=session_id,
+    )
+    assert result["action"] == "info"
+    assert "less in quantity" not in result["message"].lower()
+    assert "seemed less than usual" not in result["message"].lower()
+    assert "logging this against the kitchen" in result["message"].lower()
+
+
+def test_assessment_can_understand_collapsed_typo_portion_phrase():
+    session_id = "test:portion-veryless"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "the fries were veryless"})
+    result = Rules.resolve(
+        complaint="the fries were veryless",
+        conversation_history=history,
+        order_value=478,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 10, "temperature_check": "hot"},
+        fleet={"delay_mins": 2, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 478},
+        order_items={"items": [{"name": "Peri Peri French Fries", "price": 209}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "portion_size",
+            "issue_confidence": 0.81,
+            "active_item_name": "Peri Peri French Fries",
+        },
+    )
+    assert result["action"] == "info"
+    assert "portion size" in result["message"].lower() or "sounds light" in result["message"].lower()
+
+
+def test_assessment_can_upgrade_ambiguous_issue_type_to_portion_size():
+    session_id = "test:assessment-portion"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "this felt skimpy for the price"})
+    result = Rules.resolve(
+        complaint="this felt skimpy for the price",
+        conversation_history=history,
+        order_value=219,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 12, "temperature_check": "hot"},
+        fleet={"delay_mins": 2, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 219},
+        order_items={"items": [{"name": "Veg Pink Sauce Pasta", "price": 219}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "portion_size",
+            "issue_confidence": 0.91,
+            "visual_evidence_useful": False,
+        },
+    )
+    assert result["action"] == "info"
+    assert "under-portioned" in result["message"].lower() or "portion size" in result["message"].lower()
+    assert result["_debug"]["issue_type_source"] == "llm"
+
+
+def test_llm_assessment_can_handle_typo_heavy_portion_complaint():
+    session_id = "test:assessment-typo-portion"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "fries wr vry less fr price"})
+    result = Rules.resolve(
+        complaint="fries wr vry less fr price",
+        conversation_history=history,
+        order_value=478,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 10, "temperature_check": "hot"},
+        fleet={"delay_mins": 2, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 478},
+        order_items={"items": [{"name": "Peri Peri French Fries", "price": 209}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "portion_size",
+            "issue_confidence": 0.62,
+            "visual_evidence_useful": False,
+            "active_item_name": "Peri Peri French Fries",
+        },
+    )
+    assert result["action"] == "info"
+    assert "sounds light for what you paid" in result["message"].lower() or "portion size" in result["message"].lower()
+    assert result["_debug"]["issue_type_source"] == "llm"
+
+
+def test_first_complaint_does_not_force_empathy_starter_for_generic_issue():
+    session_id = "test:no-forced-starter"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "the fries were veryless"})
+    result = Rules.resolve(
+        complaint="the fries were veryless",
+        conversation_history=history,
+        order_value=478,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 10, "temperature_check": "hot"},
+        fleet={"delay_mins": 2, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 478},
+        order_items={"items": [{"name": "Peri Peri French Fries", "price": 209}]},
+        session_id=session_id,
+    )
+    assert result["action"] == "info"
+    assert not result["message"].lower().startswith("that’s a fair call")
+    assert not result["message"].lower().startswith("sorry about that")
+
+
+def test_portion_size_coupon_offer_uses_portion_specific_language():
+    session_id = "test:portion-tone"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "the fries were less in quantity"})
+    first = Rules.resolve(
+        complaint="the fries were less in quantity",
+        conversation_history=history,
+        order_value=478,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 10, "temperature_check": "hot"},
+        fleet={"delay_mins": 2, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 478},
+        order_items={"items": [{"name": "Peri Peri French Fries", "price": 209}]},
+        session_id=session_id,
+    )
+    history.append({"role": "bot", "content": first["message"]})
+
+    history.append({"role": "user", "content": "i want a refund"})
+    second = Rules.resolve(
+        complaint="i want a refund",
+        conversation_history=history,
+        order_value=478,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 10, "temperature_check": "hot"},
+        fleet={"delay_mins": 2, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 478},
+        order_items={"items": [{"name": "Peri Peri French Fries", "price": 209}]},
+        session_id=session_id,
+    )
+
+    assert second["action"] == "info"
+    assert "felt short for what you paid" in second["message"].lower()
+
+
+def test_foreign_object_coupon_offer_avoids_generic_quality_language():
+    session_id = "test:foreign-object-tone"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "there was plastic in my veg pasta"})
+    first = Rules.resolve(
+        complaint="there was plastic in my veg pasta",
+        conversation_history=history,
+        order_value=756,
+        trust_score=82,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 82, "total_orders": 16},
+        order_details={"total_amount": 756},
+        order_items={"items": [{"name": "Veg Pink Sauce Pasta", "price": 219}]},
+        session_id=session_id,
+    )
+    history.append({"role": "bot", "content": first["message"]})
+
+    history.append({"role": "user", "content": "i want a refund"})
+    second = Rules.resolve(
+        complaint="i want a refund",
+        conversation_history=history,
+        order_value=756,
+        trust_score=82,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 82, "total_orders": 16},
+        order_details={"total_amount": 756},
+        order_items={"items": [{"name": "Veg Pink Sauce Pasta", "price": 219}]},
+        photo_url="https://example.com/photo.jpg",
+        photo_valid=True,
+        photo_in_session=True,
+        session_id=session_id,
+    )
+
+    assert second["action"] == "info"
+    assert "quality complaint" not in second["message"].lower()
+    assert "next step" in second["message"].lower() or "moving for you" in second["message"].lower()
+
+
+def test_sensitive_tone_guardrail_softens_refund_reinforcement_language():
+    session_id = "test:sensitive-tone-guardrail"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    outputs = []
+    for msg, assessment, photo_url, photo_valid, photo_in_session in [
+        (
+            "there was plastic in my veg pasta",
+            {
+                "issue_type": "foreign_object",
+                "issue_confidence": 0.92,
+                "issue_severity": "high",
+                "tone_guardrail": "sensitive",
+                "negotiation_allowed": True,
+                "negotiation_strength": "light",
+            },
+            None,
+            None,
+            False,
+        ),
+        (
+            "i want a refund",
+            {
+                "requested_resolution": "refund",
+                "requested_resolution_confidence": 0.95,
+                "issue_type": "foreign_object",
+                "issue_confidence": 0.92,
+                "issue_severity": "high",
+                "tone_guardrail": "sensitive",
+                "negotiation_allowed": True,
+                "negotiation_strength": "light",
+            },
+            "https://example.com/photo.jpg",
+            True,
+            True,
+        ),
+        (
+            "no i still want a refund",
+            {
+                "requested_resolution": "refund",
+                "requested_resolution_confidence": 0.95,
+                "turn_act": "switch_resolution",
+                "turn_act_confidence": 0.94,
+                "issue_type": "foreign_object",
+                "issue_confidence": 0.92,
+                "tone_guardrail": "sensitive",
+                "negotiation_allowed": True,
+                "negotiation_strength": "light",
+            },
+            None,
+            None,
+            False,
+        ),
+    ]:
+        if photo_url:
+            mark_photo_provided(session_id)
+        history.append({"role": "user", "content": msg})
+        result = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            order_value=756,
+            trust_score=82,
+            kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+            fleet={"delay_mins": 15, "traffic_flag": True},
+            trust={"score": 82, "total_orders": 16},
+            order_details={"total_amount": 756},
+            order_items={"items": [{"name": "Veg Pink Sauce Pasta", "price": 219}]},
+            session_id=session_id,
+            assessment=assessment,
+            photo_url=photo_url,
+            photo_valid=photo_valid,
+            photo_in_session=session_has_photo(session_id) or photo_in_session,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+        outputs.append(result)
+
+    assert outputs[1]["action"] == "info"
+    assert "moving for you" in outputs[1]["message"].lower() or "next step" in outputs[1]["message"].lower()
+    assert "quality complaint" not in outputs[1]["message"].lower()
+    assert "because this is more serious" not in outputs[1]["message"].lower()
+
+
+def test_negotiation_disallowed_replacement_offer_goes_direct():
+    session_id = "test:no-negotiation-replacement"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "the order was off"})
+    first = Rules.resolve(
+        complaint="the order was off",
+        conversation_history=history,
+        order_value=168,
+        trust_score=92,
+        kitchen={"quality_out": "fair", "prep_time_mins": 18, "temperature_check": "warm"},
+        fleet={"delay_mins": 0, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 168},
+        order_items={"items": [{"name": "Classic Maggi", "price": 79}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "quality",
+            "issue_confidence": 0.8,
+        },
+    )
+    history.append({"role": "bot", "content": first["message"]})
+    history.append({"role": "user", "content": "i want a replacement"})
+    second = Rules.resolve(
+        complaint="i want a replacement",
+        conversation_history=history,
+        order_value=168,
+        trust_score=92,
+        kitchen={"quality_out": "fair", "prep_time_mins": 18, "temperature_check": "warm"},
+        fleet={"delay_mins": 0, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 168},
+        order_items={"items": [{"name": "Classic Maggi", "price": 79}]},
+        session_id=session_id,
+        assessment={
+            "requested_resolution": "replacement",
+            "requested_resolution_confidence": 0.94,
+            "issue_type": "quality",
+            "issue_confidence": 0.8,
+            "active_item_name": "Classic Maggi",
+            "tone_guardrail": "operational",
+            "negotiation_allowed": False,
+            "negotiation_strength": "none",
+        },
+    )
+
+    assert second["action"] == "info"
+    assert "fresh classic maggi" in second["message"].lower()
+    assert "coupon" not in second["message"].lower()
+
+
+def test_delay_coupon_offer_stays_delay_specific():
+    session_id = "test:delay-tone"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "my order is very late"})
+    first = Rules.resolve(
+        complaint="my order is very late",
+        conversation_history=history,
+        order_value=320,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 10, "temperature_check": "hot"},
+        fleet={"delay_mins": 22, "traffic_flag": True},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 320},
+        order_items={"items": [{"name": "Noodles", "price": 220}]},
+        session_id=session_id,
+    )
+    history.append({"role": "bot", "content": first["message"]})
+
+    history.append({"role": "user", "content": "i want a refund"})
+    second = Rules.resolve(
+        complaint="i want a refund",
+        conversation_history=history,
+        order_value=320,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 10, "temperature_check": "hot"},
+        fleet={"delay_mins": 22, "traffic_flag": True},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 320},
+        order_items={"items": [{"name": "Noodles", "price": 220}]},
+        session_id=session_id,
+    )
+
+    assert second["action"] == "info"
+    assert "for the delay" in second["message"].lower()
+
+
+def test_unclear_coupon_reply_gets_clarification_instead_of_repeat():
+    session_id = "test:clarify-coupon"
+    clear_session(session_id)
+
+    _run_turn(session_id, "the maggi was soggy", order_value=168)
+    _run_turn(session_id, "i want a refund", order_value=168)
+    result = _run_turn(session_id, "whatever works ig", order_value=168)
+    assert result["action"] == "info"
+    assert "just to be sure" in result["message"].lower()
+    assert "coupon, a refund, or a replacement" in result["message"].lower()
+
+
+def test_refund_amount_parser_handles_number_inside_natural_phrase():
+    session_id = "test:refund-natural-number"
+    clear_session(session_id)
+
+    _run_turn(session_id, "i got the wrong item", order_value=168)
+    _run_turn(session_id, "i want a refund", order_value=168, photo_url="https://example.com/proof.jpg", photo_valid=True)
+    _run_turn(session_id, "no i need a refund", order_value=168)
+    result = _run_turn(session_id, "75 is gtg", order_value=168)
+    assert result["action"] == "refund"
+    assert result["amount"] == 126
+
+
+def test_assessment_can_trigger_live_capture_for_ambiguous_visual_complaint():
+    session_id = "test:assessment-visual"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    history.append({"role": "user", "content": "the box was a mess when it got here"})
+    result = Rules.resolve(
+        complaint="the box was a mess when it got here",
+        conversation_history=history,
+        order_value=627,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 15, "temperature_check": "cold"},
+        fleet={"delay_mins": 8, "traffic_flag": True},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 627},
+        order_items={"items": [{"name": "Caesar Salad", "price": 259}, {"name": "Cold Coffee", "price": 159}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "spill_leak",
+            "issue_confidence": 0.88,
+            "requested_resolution": "refund",
+            "visual_evidence_useful": True,
+        },
+    )
+    assert result["action"] == "live_capture"
+    assert "photo" in result["message"].lower()
+
+
+def test_fuzzy_item_matching_keeps_item_name_for_typos():
+    session_id = "test:fuzzy-item"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["order_items"] = {
+        "items": [
+            {"name": "Roohafza Sharbat", "price": 79},
+            {"name": "Dark Chocolate Oreo Shake", "price": 189},
+        ]
+    }
+
+    history.append({"role": "user", "content": "the rooafza isnt cold"})
+    first = Rules.resolve(
+        complaint="the rooafza isnt cold",
+        conversation_history=history,
+        order_value=756,
+        trust_score=ctx["trust"]["score"],
+        kitchen=ctx["kitchen"],
+        fleet=ctx["fleet"],
+        trust=ctx["trust"],
+        order_details=ctx["order_details"],
+        order_items=ctx["order_items"],
+        session_id=session_id,
+    )
+    history.append({"role": "bot", "content": first["message"]})
+
+    history.append({"role": "user", "content": "can i get a replacement?"})
+    second = Rules.resolve(
+        complaint="can i get a replacement?",
+        conversation_history=history,
+        order_value=756,
+        trust_score=ctx["trust"]["score"],
+        kitchen=ctx["kitchen"],
+        fleet=ctx["fleet"],
+        trust=ctx["trust"],
+        order_details=ctx["order_details"],
+        order_items=ctx["order_items"],
+        session_id=session_id,
+    )
+    history.append({"role": "bot", "content": second["message"]})
+
+    history.append({"role": "user", "content": "no I ened another cold reooafxa"})
+    result = Rules.resolve(
+        complaint="no I ened another cold reooafxa",
+        conversation_history=history,
+        order_value=756,
+        trust_score=ctx["trust"]["score"],
+        kitchen=ctx["kitchen"],
+        fleet=ctx["fleet"],
+        trust=ctx["trust"],
+        order_details=ctx["order_details"],
+        order_items=ctx["order_items"],
+        session_id=session_id,
+    )
+    assert "roohafza" in result["message"].lower()
+
+
+def test_refund_request_after_replacement_approval_does_not_restart_coupon_loop():
+    session_id = "test:refund-after-replacement"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["trust"]["score"] = 82
+    ctx["kitchen"] = {"quality_out": "fair", "prep_time_mins": 18, "temperature_check": "warm"}
+    ctx["fleet"] = {"delay_mins": 0, "traffic_flag": False}
+    ctx["order_items"] = {"items": [{"name": "Classic Maggi", "price": 79}]}
+
+    for msg in [
+        "the maggi came soggy",
+        "can I get an replacment",
+        "I want the replacment",
+        "yes",
+        "how long will it take?",
+        "then leave get me a refund instead",
+    ]:
+        history.append({"role": "user", "content": msg})
+        result = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            order_value=168,
+            trust_score=82,
+            kitchen=ctx["kitchen"],
+            fleet=ctx["fleet"],
+            trust=ctx["trust"],
+            order_details={"total_amount": 168},
+            order_items=ctx["order_items"],
+            session_id=session_id,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+
+    assert result["action"] == "escalate"
+    assert "replacement is already approved" in result["message"].lower()
+
+
+def test_replacement_intent_in_coupon_state_is_not_misread_as_coupon_acceptance():
+    session_id = "test:replacement-not-coupon-accept"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["trust"]["score"] = 82
+    ctx["kitchen"] = {"quality_out": "fair", "prep_time_mins": 18, "temperature_check": "warm"}
+    ctx["fleet"] = {"delay_mins": 0, "traffic_flag": False}
+    ctx["order_items"] = {"items": [{"name": "Classic Maggi", "price": 79}]}
+
+    for msg in [
+        "the maggi came soggy",
+        "can you just get me a refund?",
+        "okay then just get me another maggi",
+    ]:
+        history.append({"role": "user", "content": msg})
+        result = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            order_value=168,
+            trust_score=82,
+            kitchen=ctx["kitchen"],
+            fleet=ctx["fleet"],
+            trust=ctx["trust"],
+            order_details={"total_amount": 168},
+            order_items=ctx["order_items"],
+            session_id=session_id,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+
+    assert result["action"] == "info"
+    assert "fresh classic maggi" in result["message"].lower()
+
+
+def test_yess_confirms_replacement_without_extra_loop():
+    session_id = "test:yess-replacement"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["order_items"] = {"items": [{"name": "Classic Maggi", "price": 79}]}
+
+    for msg in ["the maggi came soggy", "i want a replacement", "i want the replacment", "yess"]:
+        history.append({"role": "user", "content": msg})
+        result = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            order_value=168,
+            trust_score=82,
+            kitchen={"quality_out": "fair", "prep_time_mins": 18, "temperature_check": "warm"},
+            fleet={"delay_mins": 0, "traffic_flag": False},
+            trust=ctx["trust"],
+            order_details={"total_amount": 168},
+            order_items=ctx["order_items"],
+            session_id=session_id,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+
+    assert result["action"] == "replacement"
+
+
+def test_llm_turn_act_switch_resolution_beats_coupon_acceptance():
+    session_id = "test:turn-act-switch-over-okay"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["order_items"] = {"items": [{"name": "Classic Maggi", "price": 79}]}
+
+    for msg, assessment in [
+        ("the maggi came soggy", None),
+        ("can you just get me a refund?", {"requested_resolution": "refund", "requested_resolution_confidence": 0.92, "turn_act": "switch_resolution", "turn_act_confidence": 0.92}),
+        ("okay then just get me another maggi", {"requested_resolution": "replacement", "requested_resolution_confidence": 0.92, "turn_act": "switch_resolution", "turn_act_confidence": 0.92}),
+    ]:
+        history.append({"role": "user", "content": msg})
+        result = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            order_value=168,
+            trust_score=82,
+            kitchen={"quality_out": "fair", "prep_time_mins": 18, "temperature_check": "warm"},
+            fleet={"delay_mins": 0, "traffic_flag": False},
+            trust=ctx["trust"],
+            order_details={"total_amount": 168},
+            order_items=ctx["order_items"],
+            session_id=session_id,
+            assessment=assessment,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+
+    assert result["action"] == "info"
+    assert "fresh classic maggi" in result["message"].lower()
+
+
+def test_llm_turn_act_confirm_accepts_yess():
+    session_id = "test:turn-act-yess"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["order_items"] = {"items": [{"name": "Classic Maggi", "price": 79}]}
+
+    for msg, assessment in [
+        ("the maggi came soggy", None),
+        ("i want a replacement", {"requested_resolution": "replacement", "requested_resolution_confidence": 0.93, "turn_act": "switch_resolution", "turn_act_confidence": 0.93}),
+        ("i want the replacment", {"requested_resolution": "replacement", "requested_resolution_confidence": 0.93, "turn_act": "switch_resolution", "turn_act_confidence": 0.93}),
+        ("yess", {"turn_act": "confirm", "turn_act_confidence": 0.91}),
+    ]:
+        history.append({"role": "user", "content": msg})
+        result = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            order_value=168,
+            trust_score=82,
+            kitchen={"quality_out": "fair", "prep_time_mins": 18, "temperature_check": "warm"},
+            fleet={"delay_mins": 0, "traffic_flag": False},
+            trust=ctx["trust"],
+            order_details={"total_amount": 168},
+            order_items=ctx["order_items"],
+            session_id=session_id,
+            assessment=assessment,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+
+    assert result["action"] == "replacement"
+
+
+def test_high_severity_replacement_path_negotiates_before_confirming_replacement():
+    session_id = "test:strong-replacement-negotiation"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["order_items"] = {"items": [{"name": "Roohafza Sharbat", "price": 99}]}
+
+    for msg, assessment in [
+        ("sharbat was spilled", {"issue_type": "spill_leak", "issue_confidence": 0.91}),
+        ("i need a replacement", {"requested_resolution": "replacement", "requested_resolution_confidence": 0.94, "turn_act": "switch_resolution", "turn_act_confidence": 0.94, "issue_type": "spill_leak", "issue_confidence": 0.91}),
+        ("photo attached", {"issue_type": "spill_leak", "issue_confidence": 0.91, "requested_resolution": "replacement", "requested_resolution_confidence": 0.94},),
+        ("then arrange replacement", {"requested_resolution": "replacement", "requested_resolution_confidence": 0.94, "turn_act": "switch_resolution", "turn_act_confidence": 0.94}),
+    ]:
+        history.append({"role": "user", "content": msg})
+        result = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            order_value=756,
+            trust_score=82,
+            kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+            fleet={"delay_mins": 15, "traffic_flag": True},
+            trust=ctx["trust"],
+            order_details={"total_amount": 756},
+            order_items=ctx["order_items"],
+            session_id=session_id,
+            assessment=assessment,
+            photo_url="https://example.com/p.jpg" if msg == "photo attached" else None,
+            photo_valid=True if msg == "photo attached" else None,
+            photo_in_session=True if msg == "photo attached" else False,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+
+    bot_messages = [entry["content"].lower() for entry in history if entry["role"] == "bot"]
+    assert any("coupon" in msg for msg in bot_messages)
+    assert not any("approved a fresh roohafza sharbat replacement" in msg for msg in bot_messages)
+
+
+def test_high_severity_foreign_object_replacement_path_also_negotiates_before_confirming():
+    session_id = "test:high-severity-foreign-object-replacement-negotiation"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["order_items"] = {"items": [{"name": "Veg Pink Sauce Pasta", "price": 219}]}
+
+    turns = [
+        (
+            "there was plastic in my veg pasta",
+            {"issue_type": "foreign_object", "issue_confidence": 0.94, "issue_severity": "high"},
+            None,
+            None,
+            False,
+        ),
+        (
+            "i need a replacement",
+            {
+                "requested_resolution": "replacement",
+                "requested_resolution_confidence": 0.95,
+                "turn_act": "switch_resolution",
+                "turn_act_confidence": 0.95,
+                "issue_type": "foreign_object",
+                "issue_confidence": 0.94,
+                "issue_severity": "high",
+            },
+            None,
+            None,
+            False,
+        ),
+        (
+            "photo attached",
+            {
+                "issue_type": "foreign_object",
+                "issue_confidence": 0.94,
+                "issue_severity": "high",
+                "requested_resolution": "replacement",
+                "requested_resolution_confidence": 0.95,
+            },
+            "https://example.com/photo.jpg",
+            True,
+            True,
+        ),
+        (
+            "no i still need a replacement",
+            {
+                "requested_resolution": "replacement",
+                "requested_resolution_confidence": 0.95,
+                "turn_act": "switch_resolution",
+                "turn_act_confidence": 0.94,
+            },
+            None,
+            None,
+            False,
+        ),
+    ]
+
+    outputs = []
+    for msg, assessment, photo_url, photo_valid, photo_in_session in turns:
+        if photo_url:
+            mark_photo_provided(session_id)
+        history.append({"role": "user", "content": msg})
+        result = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            order_value=756,
+            trust_score=82,
+            kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+            fleet={"delay_mins": 15, "traffic_flag": True},
+            trust=ctx["trust"],
+            order_details={"total_amount": 756},
+            order_items=ctx["order_items"],
+            session_id=session_id,
+                assessment=assessment,
+                photo_url=photo_url,
+                photo_valid=photo_valid,
+                photo_in_session=session_has_photo(session_id) or photo_in_session,
+            )
+        history.append({"role": "bot", "content": result["message"]})
+        outputs.append(result)
+
+    assert outputs[2]["action"] == "info"
+    assert "coupon" in outputs[2]["message"].lower()
+    assert outputs[3]["action"] == "info"
+    assert "coupon" in outputs[3]["message"].lower()
+    assert "fresh veg pink sauce pasta" not in outputs[3]["message"].lower()
+
+
+def test_llm_can_force_clarification_for_ambiguous_turn():
+    session_id = "test:llm-clarify-ambiguous"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    msg = "its just off"
+    history.append({"role": "user", "content": msg})
+    result = Rules.resolve(
+        complaint=msg,
+        conversation_history=history,
+        order_value=149,
+        trust_score=86,
+        kitchen={"quality_out": "good", "prep_time_mins": 12, "temperature_check": "hot"},
+        fleet={"delay_mins": 0, "traffic_flag": False},
+        trust=ctx["trust"],
+        order_details={"total_amount": 149},
+        order_items=ctx["order_items"],
+        session_id=session_id,
+        assessment={
+            "issue_type": "other",
+            "issue_confidence": 0.52,
+            "turn_act": "clarify",
+            "recommended_next_step": "clarify",
+            "clarification_needed": True,
+        },
+    )
+
+    assert result["action"] == "info"
+    assert "make sure i get this right" in result["message"].lower()
+    assert result["_debug"]["clarification_needed"] is True
+
+
+def test_assessment_low_confidence_does_not_fallback_to_phrase_matching():
+    session_id = "test:no-understanding-fallback"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    msg = "the fries were veryless"
+    history.append({"role": "user", "content": msg})
+    result = Rules.resolve(
+        complaint=msg,
+        conversation_history=history,
+        order_value=149,
+        trust_score=86,
+        kitchen={"quality_out": "good", "prep_time_mins": 12, "temperature_check": "hot"},
+        fleet={"delay_mins": 0, "traffic_flag": False},
+        trust=ctx["trust"],
+        order_details={"total_amount": 149},
+        order_items={"items": [{"name": "Peri Peri French Fries", "price": 149}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "other",
+            "issue_confidence": 0.2,
+            "requested_resolution": "none",
+            "turn_act": "none",
+        },
+    )
+
+    assert result["action"] == "info"
+    assert "make sure i get this right" in result["message"].lower()
+    assert result["_debug"]["issue_type"] == "other"
+
+
+def test_low_confidence_requested_resolution_clarifies_instead_of_switching_flow():
+    session_id = "test:low-confidence-resolution"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    history.append({"role": "user", "content": "the order was off"})
+    first = Rules.resolve(
+        complaint="the order was off",
+        conversation_history=history,
+        order_value=149,
+        trust_score=86,
+        kitchen={"quality_out": "good", "prep_time_mins": 12, "temperature_check": "hot"},
+        fleet={"delay_mins": 0, "traffic_flag": False},
+        trust=ctx["trust"],
+        order_details={"total_amount": 149},
+        order_items=ctx["order_items"],
+        session_id=session_id,
+        assessment={
+            "issue_type": "other",
+            "issue_confidence": 0.44,
+            "requested_resolution": "refund",
+            "requested_resolution_confidence": 0.31,
+            "turn_act": "clarify",
+            "turn_act_confidence": 0.72,
+            "clarification_needed": True,
+            "recommended_next_step": "clarify",
+        },
+    )
+
+    assert first["action"] == "info"
+    assert "make sure i get this right" in first["message"].lower()
+    assert first["_debug"]["requested_resolution"] == "none"
+
+
+def test_low_confidence_turn_act_does_not_confirm_pending_replacement():
+    session_id = "test:low-confidence-turn-act"
+    clear_session(session_id)
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["order_items"] = {"items": [{"name": "Classic Maggi", "price": 79}]}
+
+    for msg, assessment in [
+        ("the maggi came soggy", None),
+        ("i want a replacement", {"requested_resolution": "replacement", "requested_resolution_confidence": 0.93, "turn_act": "switch_resolution", "turn_act_confidence": 0.92, "issue_type": "quality", "issue_confidence": 0.9}),
+        ("yes", {"turn_act": "confirm", "turn_act_confidence": 0.22}),
+    ]:
+        history.append({"role": "user", "content": msg})
+        result = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            order_value=168,
+            trust_score=82,
+            kitchen={"quality_out": "fair", "prep_time_mins": 18, "temperature_check": "warm"},
+            fleet={"delay_mins": 0, "traffic_flag": False},
+            trust=ctx["trust"],
+            order_details={"total_amount": 168},
+            order_items=ctx["order_items"],
+            session_id=session_id,
+            assessment=assessment,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+
+    assert result["action"] == "info"
+    assert "just to be sure" in result["message"].lower() or "want me to go with that" in result["message"].lower()
+
+
+def test_llm_fault_hint_can_break_unclear_tie_but_not_override_clear_data():
+    session_id = "test:llm-fault-hint"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    msg = "the roohafza was not cold enough"
+    history.append({"role": "user", "content": msg})
+    result = Rules.resolve(
+        complaint=msg,
+        conversation_history=history,
+        order_value=99,
+        trust_score=88,
+        kitchen={"quality_out": "good", "prep_time_mins": 8, "temperature_check": "hot"},
+        fleet={"delay_mins": 0, "traffic_flag": False},
+        trust=ctx["trust"],
+        order_details={"total_amount": 99},
+        order_items={"items": [{"name": "Roohafza Sharbat", "price": 99}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "temperature",
+            "issue_confidence": 0.84,
+            "fault_hint": "delivery",
+        },
+    )
+
+    assert result["_debug"]["fault"] == "delivery"
+    assert result["_debug"]["fault_source"] == "llm"
+
+    clear_session(session_id)
+    history = get_session(session_id)
+    history.append({"role": "user", "content": msg})
+    result = Rules.resolve(
+        complaint=msg,
+        conversation_history=history,
+        order_value=99,
+        trust_score=88,
+        kitchen={"quality_out": "fair", "prep_time_mins": 8, "temperature_check": "warm"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust=ctx["trust"],
+        order_details={"total_amount": 99},
+        order_items={"items": [{"name": "Roohafza Sharbat", "price": 99}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "temperature",
+            "issue_confidence": 0.84,
+            "fault_hint": "delivery",
+        },
+    )
+
+    assert result["_debug"]["fault"] == "kitchen"
+    assert result["_debug"]["fault_source"] == "fallback"
