@@ -54,6 +54,7 @@ class Rules:
     ALLOWED_RESOLUTIONS = {"none", "refund", "replacement", "coupon", "credit"}
     ALLOWED_INFO_QUERIES = {"none", "items", "total", "status"}
     ALLOWED_SEVERITIES = {"low", "medium", "high"}
+    ALLOWED_DIETARY_SEVERITIES = {"none", "low", "medium", "high"}
     ALLOWED_FAULT_HINTS = {"kitchen", "delivery", "unclear"}
     ALLOWED_ECONOMIC_PREFERENCES = {"coupon", "refund", "replacement", "escalate"}
     ALLOWED_TONE_GUARDRAILS = {"neutral", "sensitive", "persuasive", "operational"}
@@ -114,6 +115,15 @@ class Rules:
         assessed_clarification_needed = Rules._normalize_bool(assessment.get("clarification_needed"))
         assessed_issue_confidence = Rules._normalize_confidence(assessment.get("issue_confidence"))
         assessed_issue_severity = Rules._validated_enum(assessment.get("issue_severity"), Rules.ALLOWED_SEVERITIES)
+        assessed_selected_item_conflict = Rules._normalize_bool(assessment.get("selected_item_conflict"))
+        assessed_mentioned_item_name = assessment.get("mentioned_item_name") if isinstance(assessment.get("mentioned_item_name"), str) else None
+        assessed_semantic_risk = Rules._normalize_bool(assessment.get("semantic_risk"))
+        assessed_semantic_confidence = Rules._normalize_confidence(assessment.get("semantic_confidence"))
+        assessed_semantic_risk_reason = assessment.get("semantic_risk_reason") if isinstance(assessment.get("semantic_risk_reason"), str) else None
+        assessed_dietary_severity = Rules._validated_enum(
+            assessment.get("dietary_severity"),
+            Rules.ALLOWED_DIETARY_SEVERITIES,
+        )
         assessed_economic_preference = Rules._validated_enum(
             assessment.get("economic_preference"), Rules.ALLOWED_ECONOMIC_PREFERENCES
         )
@@ -214,6 +224,11 @@ class Rules:
         if issue_type == "foreign_object" and prep_anomaly:
             issue_type = "quality"
         issue_type = Rules._strong_text_issue_override(user_text, issue_type)
+        semantic_confidence = assessed_semantic_confidence
+        if semantic_confidence is None:
+            semantic_confidence = assessed_issue_confidence or 0.0
+        if assessed_dietary_severity == "high" and semantic_confidence >= 0.5:
+            issue_type = "foreign_object"
         strong_new_issue_from_info = (
             state.get("case_issue_type") == "info_query"
             and Rules._has_strong_new_issue_signal(user_text, "info_query")
@@ -258,6 +273,8 @@ class Rules:
         if prep_anomaly:
             fault = "kitchen"
         issue_severity = Rules._choose_issue_severity(issue_type, assessed_issue_severity, assessed_issue_confidence, kitchen, fleet)
+        if assessed_dietary_severity == "high" and semantic_confidence >= 0.5:
+            issue_severity = "high"
         explicit_comp = wants in {"refund", "replacement", "coupon", "credit"}
         current_turn_has_photo = bool(photo_url)
         current_case_photo_key = Rules._photo_case_key(issue_type, item.get("name"))
@@ -364,6 +381,12 @@ class Rules:
         state["tone_guardrail"] = tone_guardrail
         state["negotiation_allowed"] = negotiation_allowed
         state["negotiation_strength"] = negotiation_strength
+        state["selected_item_conflict"] = bool(assessed_selected_item_conflict)
+        state["mentioned_item_name"] = assessed_mentioned_item_name
+        state["semantic_risk"] = bool(assessed_semantic_risk)
+        state["semantic_confidence"] = semantic_confidence
+        state["semantic_risk_reason"] = assessed_semantic_risk_reason
+        state["dietary_severity"] = assessed_dietary_severity or "none"
         if info_query != "none":
             state["last_info_query"] = info_query
 
@@ -379,6 +402,58 @@ class Rules:
             }
             Rules._store_terminal_state(state)
             return Rules._enforce_content(response, state)
+
+        if Rules._semantic_clarification_needed(
+            assessment_provided=assessment_provided,
+            selected_item_conflict=assessed_selected_item_conflict,
+            semantic_risk=assessed_semantic_risk,
+            semantic_confidence=semantic_confidence,
+            recommended_next_step=assessed_recommended_next_step,
+            clarification_needed=assessed_clarification_needed,
+        ):
+            state["pending"] = None
+            state["desired_resolution"] = None
+            response = {
+                "action": "info",
+                "amount": 0.0,
+                "message": Rules._semantic_clarification_message(
+                    selected_item=item_name,
+                    mentioned_item=Rules._canonical_item_name(order_items, assessed_mentioned_item_name),
+                    semantic_risk_reason=assessed_semantic_risk_reason,
+                ),
+                "reason": "LLM semantic guard requested clarification",
+            }
+            response = Rules._enforce_content(response, state)
+            response["_debug"] = Rules._debug_payload(
+                issue_type=issue_type,
+                assessment_provided=assessment_provided,
+                assessed_issue_type=assessed_issue_type,
+                assessed_issue_confidence=assessed_issue_confidence,
+                fault=fault,
+                assessed_fault_hint=assessed_fault_hint,
+                needs_visual=needs_visual,
+                assessed_visual_evidence=assessed_visual_evidence,
+                wants=wants,
+                assessed_resolution_confidence=assessed_resolution_confidence,
+                item_name=item.get("name") or state.get("active_item_name"),
+                issue_severity=issue_severity,
+                evidence_strength=evidence_strength,
+                economic_preference=economic_preference,
+                turn_act=turn_act,
+                assessed_turn_act_confidence=assessed_turn_act_confidence,
+                assessed_info_query_confidence=assessed_info_query_confidence,
+                assessed_recommended_next_step=assessed_recommended_next_step,
+                clarification_needed=True,
+                tone_guardrail=tone_guardrail,
+                negotiation_allowed=negotiation_allowed,
+                negotiation_strength=negotiation_strength,
+                selected_item_conflict=assessed_selected_item_conflict,
+                mentioned_item_name=assessed_mentioned_item_name,
+                semantic_risk=assessed_semantic_risk,
+                semantic_confidence=semantic_confidence,
+                dietary_severity=assessed_dietary_severity,
+            )
+            return response
 
         if photo_url and photo_valid is False:
             state["last_action"] = "escalate"
@@ -526,6 +601,11 @@ class Rules:
                 "tone_guardrail": tone_guardrail,
                 "negotiation_allowed": negotiation_allowed,
                 "negotiation_strength": negotiation_strength,
+                "selected_item_conflict": assessed_selected_item_conflict,
+                "mentioned_item_name": assessed_mentioned_item_name,
+                "semantic_risk": assessed_semantic_risk,
+                "semantic_confidence": semantic_confidence,
+                "dietary_severity": assessed_dietary_severity or "none",
             }
             return response
         if pending == "coupon":
@@ -610,6 +690,11 @@ class Rules:
             "tone_guardrail": tone_guardrail,
             "negotiation_allowed": negotiation_allowed,
             "negotiation_strength": negotiation_strength,
+            "selected_item_conflict": assessed_selected_item_conflict,
+            "mentioned_item_name": assessed_mentioned_item_name,
+            "semantic_risk": assessed_semantic_risk,
+            "semantic_confidence": semantic_confidence,
+            "dietary_severity": assessed_dietary_severity or "none",
         }
         return response
 
@@ -1690,6 +1775,105 @@ class Rules:
         if len(short_tokens) <= 2 and confidence < 0.45:
             return True
         return False
+
+    @staticmethod
+    def _semantic_clarification_needed(
+        assessment_provided: bool,
+        selected_item_conflict: Optional[bool],
+        semantic_risk: Optional[bool],
+        semantic_confidence: float,
+        recommended_next_step: Optional[str],
+        clarification_needed: Optional[bool],
+    ) -> bool:
+        if not assessment_provided or semantic_confidence < 0.6:
+            return False
+        if selected_item_conflict:
+            return True
+        if semantic_risk and (recommended_next_step == "clarify" or clarification_needed):
+            return True
+        return False
+
+    @staticmethod
+    def _semantic_clarification_message(
+        selected_item: str,
+        mentioned_item: Optional[str],
+        semantic_risk_reason: Optional[str],
+    ) -> str:
+        if mentioned_item and selected_item and selected_item != "item" and _lower(mentioned_item) != _lower(selected_item):
+            return f"I might be looking at the wrong item. You selected {selected_item}, but your message sounds like {mentioned_item}. Which item should I handle?"
+        if mentioned_item:
+            return f"I want to make sure I handle the right item. Are you asking about {mentioned_item}?"
+        if semantic_risk_reason:
+            return "I want to make sure I don't handle this under the wrong issue. Can you confirm which item and issue I should check?"
+        return "I want to make sure I don't handle the wrong thing. Which item and issue should I check?"
+
+    @staticmethod
+    def _canonical_item_name(order_items: Dict[str, Any], item_name: Optional[str]) -> Optional[str]:
+        if not item_name:
+            return None
+        item = Rules._find_item_by_name(order_items, item_name)
+        return item.get("name") if item else item_name
+
+    @staticmethod
+    def _debug_payload(
+        issue_type: str,
+        assessment_provided: bool,
+        assessed_issue_type: Optional[str],
+        assessed_issue_confidence: Optional[float],
+        fault: str,
+        assessed_fault_hint: Optional[str],
+        needs_visual: bool,
+        assessed_visual_evidence: Optional[bool],
+        wants: str,
+        assessed_resolution_confidence: Optional[float],
+        item_name: Optional[str],
+        issue_severity: str,
+        evidence_strength: str,
+        economic_preference: str,
+        turn_act: str,
+        assessed_turn_act_confidence: Optional[float],
+        assessed_info_query_confidence: Optional[float],
+        assessed_recommended_next_step: Optional[str],
+        clarification_needed: bool,
+        tone_guardrail: str,
+        negotiation_allowed: bool,
+        negotiation_strength: str,
+        selected_item_conflict: Optional[bool] = None,
+        mentioned_item_name: Optional[str] = None,
+        semantic_risk: Optional[bool] = None,
+        semantic_confidence: Optional[float] = None,
+        dietary_severity: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "issue_type": issue_type,
+            "issue_type_source": "llm" if assessment_provided and issue_type == assessed_issue_type and assessed_issue_type else "fallback",
+            "issue_confidence": assessed_issue_confidence,
+            "fault": fault,
+            "fault_source": "llm" if fault == assessed_fault_hint and assessed_fault_hint else "fallback",
+            "visual_evidence_useful": needs_visual,
+            "visual_evidence_source": "llm"
+            if assessed_visual_evidence is not None and assessed_issue_confidence is not None and assessed_issue_confidence >= Rules.MIN_VISUAL_DECISION_CONFIDENCE
+            else "fallback",
+            "requested_resolution": wants,
+            "requested_resolution_confidence": assessed_resolution_confidence,
+            "active_item_name": item_name,
+            "issue_severity": issue_severity,
+            "evidence_strength": evidence_strength,
+            "economic_preference": economic_preference,
+            "turn_act": turn_act,
+            "turn_act_confidence": assessed_turn_act_confidence,
+            "info_query_confidence": assessed_info_query_confidence,
+            "recommended_next_step": assessed_recommended_next_step or "fallback",
+            "clarification_needed": clarification_needed,
+            "tone_guardrail": tone_guardrail,
+            "negotiation_allowed": negotiation_allowed,
+            "negotiation_strength": negotiation_strength,
+            "selected_item_conflict": selected_item_conflict,
+            "mentioned_item_name": mentioned_item_name,
+            "semantic_risk": semantic_risk,
+            "semantic_confidence": semantic_confidence,
+            "dietary_severity": dietary_severity or "none",
+        }
 
     @staticmethod
     def _default_issue_severity(issue_type: str, kitchen: Dict[str, Any], fleet: Dict[str, Any]) -> str:

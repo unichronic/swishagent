@@ -8,6 +8,7 @@ allowed action in code, and return a short human-sounding message.
 import json
 import logging
 import os
+import re
 import time
 from contextlib import ExitStack
 from typing import Optional
@@ -114,6 +115,7 @@ def _assess_case(
                 'requested_resolution=["none","refund","replacement","coupon","credit"], '
                 'info_query=["none","items","total","status"], '
                 'issue_severity=["low","medium","high"], '
+                'dietary_severity=["none","low","medium","high"], '
                 'fault_hint=["kitchen","delivery","unclear"], '
                 'economic_preference=["coupon","refund","replacement","escalate"], '
                 'tone_guardrail=["neutral","sensitive","persuasive","operational"], '
@@ -132,6 +134,10 @@ def _assess_case(
                 "Use spill_leak for leaking, spilled, burst-open, opened-and-spilled, or contents-coming-out complaints. "
                 "Use foreign_object for hair, plastic, glass, stone, insect, or non-veg-in-veg contamination complaints. "
                 "Use portion_size for too little, too small, skimpy, light-for-the-price, less quantity, or under-portioned complaints. "
+                "Semantic safety guidance: set selected_item_conflict=true when the structured/picked item or prior item conflicts with the item the customer is actually describing. "
+                "If selected_item_conflict=true, set mentioned_item_name to the closest order item the customer appears to mean and recommended_next_step=clarify unless the customer clearly corrected the item. "
+                "Set semantic_risk=true when common sense says the deterministic flow may act on the wrong item, wrong issue, wrong category, or unsafe dietary interpretation. Set semantic_confidence from 0 to 1. "
+                "Dietary asymmetry: non-veg in veg/vegetarian food is high dietary_severity and foreign_object/sensitive; vegetable/veg in non-veg food is usually low dietary_severity and quality/prep mix-up unless the customer mentions allergy, religion, or a strict dietary restriction that makes it serious. "
                 "Visual-evidence guidance: usually true for wrong_item, missing_item in multi-item orders, damaged, spill_leak, and foreign_object; usually false for quality, temperature, delay, and portion_size. "
                 "Set issue_confidence, requested_resolution_confidence, turn_act_confidence, and info_query_confidence as numbers from 0 to 1. "
                 "Set fault_hint based on what the evidence most plausibly suggests, but use unclear if the evidence does not support a confident cause. "
@@ -169,7 +175,7 @@ def _assess_case(
                 f"Fleet: {fleet}\n"
                 f"Trust: {trust}\n"
                 "If the text is messy, first mentally normalize what the customer probably meant, then classify it.\n"
-                'Return JSON only with keys: issue_type, issue_confidence, requested_resolution, requested_resolution_confidence, info_query, info_query_confidence, assurance_query, turn_act, turn_act_confidence, issue_severity, active_item_name, visual_evidence_useful, fault_hint, recommended_next_step, clarification_needed, economic_preference, economic_confidence, tone_guardrail, negotiation_allowed, negotiation_strength, notes.'
+                'Return JSON only with keys: issue_type, issue_confidence, requested_resolution, requested_resolution_confidence, info_query, info_query_confidence, assurance_query, turn_act, turn_act_confidence, issue_severity, active_item_name, selected_item_conflict, mentioned_item_name, semantic_risk, semantic_confidence, semantic_risk_reason, dietary_severity, visual_evidence_useful, fault_hint, recommended_next_step, clarification_needed, economic_preference, economic_confidence, tone_guardrail, negotiation_allowed, negotiation_strength, notes.'
             ),
         },
     ]
@@ -233,9 +239,6 @@ def _humanize_message(
     original = resolution.get("message", "")
     if resolution.get("action") in {"replacement", "refund", "live_capture"}:
         return resolution
-    issue_type = (resolution.get("_debug") or {}).get("issue_type")
-    if issue_type == "portion_size":
-        return resolution
     allowed_reasons = {
         "No explicit compensation request",
         "Offer coupon before refund or replacement",
@@ -294,12 +297,28 @@ def _humanize_message(
             return resolution
         candidate = parsed.get("message")
         if candidate:
-            if _humanizer_added_new_claims(candidate, original):
+            if _humanizer_changed_meaning(candidate, original, complaint, resolution, order_items):
                 return resolution
             resolution["message"] = Rules._enforce_content({"message": candidate}).get("message", original)
     except Exception:
         pass
     return resolution
+
+
+def _humanizer_changed_meaning(
+    candidate: str,
+    original: str,
+    complaint: str,
+    resolution: dict,
+    order_items: dict,
+) -> bool:
+    if _humanizer_added_new_claims(candidate, original):
+        return True
+    if _humanizer_dropped_required_terms(candidate, original, complaint, resolution, order_items):
+        return True
+    if _humanizer_weakened_uncertainty(candidate, original):
+        return True
+    return False
 
 
 def _humanizer_added_new_claims(candidate: str, original: str) -> bool:
@@ -327,6 +346,138 @@ def _humanizer_added_new_claims(candidate: str, original: str) -> bool:
         "₹" in original or "%" in original_lower or "coupon" in original_lower or "credit" in original_lower
     ):
         return True
+    for amount in re.findall(r"₹\s*\d+", original):
+        if amount.replace(" ", "") not in candidate.replace(" ", ""):
+            return True
+    if "coupon" in original_lower and "coupon" not in candidate_lower:
+        return True
+    return False
+
+
+def _humanizer_dropped_required_terms(
+    candidate: str,
+    original: str,
+    complaint: str,
+    resolution: dict,
+    order_items: dict,
+) -> bool:
+    candidate_lower = candidate.lower()
+    original_lower = original.lower()
+    complaint_lower = complaint.lower()
+    debug = resolution.get("_debug") or {}
+    issue_type = debug.get("issue_type")
+
+    item_terms = _meaningful_item_terms(order_items)
+    original_item_terms = {term for term in item_terms if term in original_lower}
+    if original_item_terms and not any(term in candidate_lower for term in original_item_terms):
+        return True
+
+    component_terms = {
+        "chicken",
+        "paneer",
+        "fries",
+        "rice",
+        "noodles",
+        "sauce",
+        "cheese",
+        "maggi",
+        "samosa",
+        "aloo",
+    }
+    complaint_components = {term for term in component_terms if re.search(rf"\b{re.escape(term)}\b", complaint_lower)}
+    original_components = {term for term in component_terms if re.search(rf"\b{re.escape(term)}\b", original_lower)}
+    required_components = complaint_components & original_components
+    if required_components and not any(re.search(rf"\b{re.escape(term)}\b", candidate_lower) for term in required_components):
+        return True
+
+    if issue_type == "portion_size" or "quantity" in original_lower or "portion" in original_lower:
+        if required_components and not any(term in candidate_lower for term in ["quantity", "portion", "less", "low", "short", "enough"]):
+            return True
+        whole_item_reframes = [
+            "bowl was small",
+            "bowl is small",
+            "too light",
+            "light for",
+            "too small",
+            "small bowl",
+            "small portion",
+        ]
+        if required_components and any(phrase in candidate_lower for phrase in whole_item_reframes):
+            return True
+
+    issue_terms = {
+        "spill_leak": ["spill", "spilled", "leak", "leaked"],
+        "wrong_item": ["wrong item", "different item"],
+        "missing_item": ["missing", "not made it", "left out"],
+        "delay": ["delay", "late", "behind"],
+    }
+    for term in issue_terms.get(issue_type, []):
+        if term in original_lower and term not in candidate_lower:
+            return True
+    return False
+
+
+def _meaningful_item_terms(order_items: dict) -> set[str]:
+    if not isinstance(order_items, dict):
+        return set()
+    stopwords = {"style", "classic", "dark", "chocolate", "veg", "non", "with", "and", "the"}
+    terms: set[str] = set()
+    for item in order_items.get("items", [])[:4]:
+        name = str(item.get("name", "")).lower()
+        for token in re.findall(r"[a-z0-9]+", name):
+            if len(token) >= 4 and token not in stopwords:
+                terms.add(token)
+    return terms
+
+
+def _humanizer_weakened_uncertainty(candidate: str, original: str) -> bool:
+    candidate_lower = candidate.lower()
+    original_lower = original.lower()
+    uncertainty_markers = [
+        "can't verify",
+        "cannot verify",
+        "can't confirm",
+        "cannot confirm",
+        "don't prove",
+        "doesn't prove",
+        "don't cleanly show",
+        "doesn't cleanly show",
+        "not clearly",
+        "not cleanly",
+    ]
+    if any(marker in original_lower for marker in uncertainty_markers):
+        candidate_kept_uncertainty = any(
+            marker in candidate_lower
+            for marker in [
+                "can't verify",
+                "cannot verify",
+                "can't confirm",
+                "cannot confirm",
+                "don't have enough",
+                "do not have enough",
+                "doesn't prove",
+                "don't prove",
+                "not clear",
+                "not cleanly",
+                "can't tell",
+                "cannot tell",
+            ]
+        )
+        if not candidate_kept_uncertainty:
+            return True
+    certainty_upgrades = [
+        "i can see",
+        "i confirmed",
+        "clearly",
+        "definitely",
+        "you are right",
+        "you're right",
+        "was too small",
+        "was not enough",
+    ]
+    if any(marker in original_lower for marker in uncertainty_markers):
+        if any(phrase in candidate_lower and phrase not in original_lower for phrase in certainty_upgrades):
+            return True
     return False
 
 

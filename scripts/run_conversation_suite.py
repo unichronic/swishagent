@@ -24,6 +24,8 @@ from pathlib import Path
 
 import requests
 
+from response_quality import evaluate_response_quality
+
 
 @dataclass(frozen=True)
 class Turn:
@@ -1439,6 +1441,20 @@ def _validate_case(case: LiveCase, outputs: list[dict], status_payload: dict | N
             errors.append(f"turn {output['turn']} missing message")
         if response.get("style_warnings"):
             errors.append(f"turn {output['turn']} style warnings: {response.get('style_warnings')}")
+        previous_messages = [
+            (prior.get("response") or {}).get("message", "")
+            for prior in outputs[: max(0, int(output["turn"]) - 1)]
+            if "error" not in prior
+        ]
+        quality_errors = evaluate_response_quality(
+            response,
+            complaint=output.get("complaint", ""),
+            expected_issue_type=((response.get("case_state") or {}).get("final_issue_type") or case.expected_issue_type),
+            expected_item_name=((response.get("case_state") or {}).get("selected_item") or ""),
+            previous_messages=previous_messages,
+        )
+        if quality_errors:
+            errors.append(f"turn {output['turn']} response quality errors: {quality_errors}")
     if case.strict_tone:
         errors.extend(_conversation_tone_errors(outputs))
     final_response = outputs[-1].get("response") or {}

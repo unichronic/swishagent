@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import pytest
 
 from order_data import ORDER_DATABASE
+from response_quality import evaluate_response_quality
 from rules import Rules, clear_session, get_session, get_session_state, mark_photo_provided, session_has_photo
 from support_state import style_warnings
 
@@ -990,6 +991,13 @@ def test_practical_customer_openers_are_understood(case: OpenerCase):
     assert result["action"] in VALID_ACTIONS
     assert result["message"].strip()
     assert style_warnings(result["message"]) == []
+    assert evaluate_response_quality(
+        result,
+        complaint=case.complaint,
+        order_items=_runtime_context(case.order_id, case.issue_type)["order_items"],
+        expected_issue_type=case.issue_type,
+        expected_item_name=case.item_name,
+    ) == []
     assert result["_debug"]["issue_type"] == case.issue_type
     assert result["_debug"]["issue_type_source"] == "llm"
     assert "i completely understand" not in result["message"].lower()
@@ -1004,6 +1012,7 @@ def test_generated_behavioral_conversations_reach_expected_terminal_action(case:
     clear_session(session_id)
 
     result = None
+    previous_messages = []
     for turn in case.turns:
         result = _run_turn(
             session_id,
@@ -1015,6 +1024,15 @@ def test_generated_behavioral_conversations_reach_expected_terminal_action(case:
             assessment=turn.get("assessment"),
             trust_score=turn.get("trust_score"),
         )
+        assert evaluate_response_quality(
+            result,
+            complaint=turn["complaint"],
+            order_items=_runtime_context(case.order_id, turn["issue_type"])["order_items"],
+            expected_issue_type=_result_issue_type(result, session_id) or turn["issue_type"],
+            expected_item_name=(result.get("_debug") or {}).get("active_item_name") or case.item_name,
+            previous_messages=previous_messages,
+        ) == []
+        previous_messages.append(result["message"])
 
     assert result is not None
     assert result["action"] == case.expected_terminal_action
@@ -1031,6 +1049,7 @@ def test_generated_behavioral_conversations_reach_expected_terminal_action(case:
 def test_order_level_info_queries_work_for_every_order(order_id: str):
     session_id = f"qa:{order_id}:info"
     clear_session(session_id)
+    order = ORDER_DATABASE[order_id]
 
     queries = (
         ("what were the items in this order?", "items"),
@@ -1053,8 +1072,14 @@ def test_order_level_info_queries_work_for_every_order(order_id: str):
         )
         results.append(result)
         assert result["action"] == "info"
+        assert evaluate_response_quality(
+            result,
+            complaint=complaint,
+            order_items={"items": order["items"]},
+            expected_issue_type="info_query",
+            previous_messages=[item["message"] for item in results[:-1]],
+        ) == []
 
-    order = ORDER_DATABASE[order_id]
     assert order["items"][0]["name"].lower() in results[0]["message"].lower()
     assert str(order["total_amount"]) in results[1]["message"]
     assert order["status"].lower() in results[2]["message"].lower()
@@ -1073,4 +1098,11 @@ def test_adversarial_issue_item_mix_does_not_break_resolution():
         result = _run_turn(session_id, order_id, complaint, "quality")
         assert result["action"] in VALID_ACTIONS
         assert result["message"].strip()
+        assert evaluate_response_quality(
+            result,
+            complaint=complaint,
+            order_items=_runtime_context(order_id, "quality")["order_items"],
+            expected_issue_type=(result.get("_debug") or {}).get("issue_type") or "quality",
+            expected_item_name=item_name,
+        ) == []
         assert result["_debug"]["active_item_name"] == item_name

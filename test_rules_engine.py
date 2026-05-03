@@ -2989,3 +2989,110 @@ def test_actual_item_correction_overrides_picker_item():
 
     assert result["_debug"]["active_item_name"] == "Roohafza"
     assert "roohafza" in result["message"].lower()
+
+
+def test_llm_semantic_conflict_forces_item_clarification_before_policy_action():
+    session_id = "test:semantic-item-conflict"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    complaint = "I selected Roohafza Sharbat but the fries are missing"
+    history.append({"role": "user", "content": complaint})
+    result = Rules.resolve(
+        complaint=complaint,
+        conversation_history=history,
+        order_value=478,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 8, "temperature_check": "hot"},
+        fleet={"delay_mins": 4, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 478},
+        order_items={"items": [{"name": "Roohafza Sharbat", "price": 79}, {"name": "Peri Peri French Fries", "price": 209}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "missing_item",
+            "issue_confidence": 0.91,
+            "active_item_name": "Roohafza Sharbat",
+            "selected_item_conflict": True,
+            "mentioned_item_name": "Peri Peri French Fries",
+            "semantic_risk": True,
+            "semantic_confidence": 0.93,
+            "recommended_next_step": "clarify",
+            "clarification_needed": True,
+        },
+    )
+
+    assert result["action"] == "info"
+    assert result["reason"] == "LLM semantic guard requested clarification"
+    assert result["_debug"]["selected_item_conflict"] is True
+    assert "roohafza" in result["message"].lower()
+    assert "fries" in result["message"].lower()
+    assert "which item" in result["message"].lower()
+    assert result["action"] not in {"coupon", "refund", "replacement", "live_capture"}
+
+
+def test_llm_high_dietary_severity_can_upgrade_common_sense_safety_case():
+    session_id = "test:semantic-dietary-high"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    complaint = "there is chicken in my veg pasta and I am vegetarian"
+    history.append({"role": "user", "content": complaint})
+    result = Rules.resolve(
+        complaint=complaint,
+        conversation_history=history,
+        order_value=219,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 8, "temperature_check": "hot"},
+        fleet={"delay_mins": 4, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 219},
+        order_items={"items": [{"name": "Veg Pink Sauce Pasta", "price": 219}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "quality",
+            "issue_confidence": 0.88,
+            "active_item_name": "Veg Pink Sauce Pasta",
+            "dietary_severity": "high",
+            "semantic_risk": True,
+            "semantic_confidence": 0.9,
+            "tone_guardrail": "sensitive",
+        },
+    )
+
+    assert result["_debug"]["issue_type"] == "foreign_object"
+    assert result["_debug"]["issue_severity"] == "high"
+    assert result["_debug"]["dietary_severity"] == "high"
+
+
+def test_llm_low_dietary_severity_keeps_veg_in_nonveg_as_prep_quality_issue():
+    session_id = "test:semantic-dietary-low"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    complaint = "there was a vegetable piece in my chicken bowl"
+    history.append({"role": "user", "content": complaint})
+    result = Rules.resolve(
+        complaint=complaint,
+        conversation_history=history,
+        order_value=269,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 8, "temperature_check": "hot"},
+        fleet={"delay_mins": 4, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 269},
+        order_items={"items": [{"name": "Butter Chicken Rice Bowl", "price": 269}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "quality",
+            "issue_confidence": 0.88,
+            "active_item_name": "Butter Chicken Rice Bowl",
+            "dietary_severity": "low",
+            "semantic_risk": False,
+            "semantic_confidence": 0.86,
+        },
+    )
+
+    assert result["_debug"]["issue_type"] == "quality"
+    assert result["_debug"]["dietary_severity"] == "low"
+    assert "wrong item" not in result["message"].lower()
