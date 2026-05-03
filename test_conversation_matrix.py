@@ -287,7 +287,7 @@ def _conversation_cases() -> list[ConversationCase]:
                 },
             ),
             expected_terminal_action="info",
-            expected_message_bits=("can't verify",),
+            expected_message_bits=("fresh classic cold coffee",),
         ),
         ConversationCase(
             case_id="ord004-spill-needs-capture",

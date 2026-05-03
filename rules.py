@@ -701,6 +701,25 @@ class Rules:
         if desired == "replacement" or (turn_act == "switch_resolution" and replacement_requested) or replacement_requested:
             state["coupon_push_count"] = push_count + 1
             if evidence_strength != "strong":
+                if (
+                    state["coupon_push_count"] >= Rules.MAX_COUPON_REINFORCEMENT_TURNS
+                    and Rules._can_soft_approve_replacement(
+                        issue_type=issue_type,
+                        order_value=order_value,
+                        item_price=state.get("active_item_price"),
+                        trust_score=trust_score,
+                        evidence_strength=evidence_strength,
+                        economic_preference=state.get("economic_preference"),
+                    )
+                ):
+                    state["pending"] = "replacement_confirm"
+                    state["desired_resolution"] = "replacement"
+                    return {
+                        "action": "info",
+                        "amount": 0.0,
+                        "message": Rules._replacement_confirm_message(item_name),
+                        "reason": "Repeated replacement request qualifies for low-risk remake confirmation",
+                    }
                 if state["coupon_push_count"] > Rules.MAX_COUPON_REINFORCEMENT_TURNS:
                     state["pending"] = None
                     state["desired_resolution"] = None
@@ -920,6 +939,7 @@ class Rules:
         )
 
         refund_requested = wants == "refund" if assessment_provided else Rules._mentions_refund(user_text)
+        replacement_reaffirmed = wants == "replacement" if assessment_provided else Rules._mentions_replacement(user_text)
         if (turn_act == "switch_resolution" and refund_requested) or (refund_requested and not hard_block_refund):
             if preferred_resolution == "replacement":
                 return {
@@ -966,6 +986,9 @@ class Rules:
                 "reason": "Refund still blocked for high-value low-trust case",
             }
 
+        if replacement_reaffirmed and turn_act in {"none", "switch_resolution", "clarify"}:
+            turn_act = "confirm"
+
         if not (turn_act == "confirm" or (not assessment_provided and turn_act == "none" and Rules._accepted(user_text))):
             return {
                 "action": "info",
@@ -978,6 +1001,21 @@ class Rules:
 
         state["pending"] = None
         if evidence_strength != "strong":
+            if Rules._can_soft_approve_replacement(
+                issue_type=state.get("issue_type", "quality"),
+                order_value=order_value,
+                item_price=state.get("active_item_price"),
+                trust_score=trust_score,
+                evidence_strength=evidence_strength,
+                economic_preference=state.get("economic_preference"),
+            ):
+                state["last_action"] = "replacement"
+                return {
+                    "action": "replacement",
+                    "amount": 0.0,
+                    "message": f"I've approved a fresh {item_name} replacement.",
+                    "reason": "Low-risk replacement approved after confirmation",
+                }
             return {
                 "action": "escalate",
                 "amount": 0.0,
@@ -1185,6 +1223,28 @@ class Rules:
         if replacement_cost - float(coupon_amount) < Rules.MIN_REPLACEMENT_NEGOTIATION_MARGIN:
             return 0
         return Rules.MAX_HIGH_SEVERITY_REPLACEMENT_NEGOTIATION_TURNS
+
+    @staticmethod
+    def _can_soft_approve_replacement(
+        issue_type: str,
+        order_value: float,
+        item_price: Optional[float],
+        trust_score: float,
+        evidence_strength: str,
+        economic_preference: Optional[str],
+    ) -> bool:
+        if issue_type not in {"quality", "temperature"}:
+            return False
+        if evidence_strength != "weak":
+            return False
+        if trust_score < Rules.REFUND_TRUST_THRESHOLD:
+            return False
+        replacement_cost = Rules._estimated_replacement_cost(order_value, item_price)
+        if replacement_cost > 320:
+            return False
+        if economic_preference not in {None, "replacement", "coupon"}:
+            return False
+        return True
 
     @staticmethod
     def _replacement_steer_message(item_name: str, hard_block_refund: bool) -> str:

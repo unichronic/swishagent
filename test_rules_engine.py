@@ -237,6 +237,88 @@ def test_unverifiable_replacement_request_pushes_coupon_then_escalates_review():
     assert "review" in outputs[4]["message"].lower()
 
 
+def test_low_risk_quality_replacement_persistence_moves_to_replacement_confirm():
+    session_id = "test:quality-replacement-soft-approve"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["kitchen"] = {"quality_out": "good", "prep_time_mins": 12, "temperature_check": "hot"}
+    ctx["fleet"] = {"delay_mins": 1, "traffic_flag": False}
+    ctx["trust"] = {"score": 92, "total_orders": 18}
+    ctx["order_items"] = {"items": [{"name": "Peri Peri French Fries", "price": 209}]}
+
+    turns = [
+        "the fries were totally soggy",
+        "can i get a replacement?",
+        "no i need another fries",
+        "replacement only",
+    ]
+    outputs = []
+    for msg in turns:
+        history.append({"role": "user", "content": msg})
+        result = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            order_value=478,
+            trust_score=ctx["trust"]["score"],
+            kitchen=ctx["kitchen"],
+            fleet=ctx["fleet"],
+            trust=ctx["trust"],
+            order_details={"total_amount": 478},
+            order_items=ctx["order_items"],
+            session_id=session_id,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+        outputs.append(result)
+
+    assert outputs[1]["action"] == "info"
+    assert "coupon" in outputs[1]["message"].lower()
+    assert outputs[3]["action"] == "info"
+    assert outputs[3]["reason"] == "Repeated replacement request qualifies for low-risk remake confirmation"
+    assert "fresh peri peri french fries" in outputs[3]["message"].lower()
+
+
+def test_replacement_reaffirmation_counts_as_confirmation():
+    session_id = "test:replacement-reaffirmation-confirms"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["kitchen"] = {"quality_out": "good", "prep_time_mins": 12, "temperature_check": "hot"}
+    ctx["fleet"] = {"delay_mins": 1, "traffic_flag": False}
+    ctx["trust"] = {"score": 92, "total_orders": 18}
+    ctx["order_items"] = {"items": [{"name": "Peri Peri French Fries", "price": 209}]}
+
+    turns = [
+        "the fries were totally soggy",
+        "can i get a replacement?",
+        "no i need another fries",
+        "replacement only",
+        "no i want replacement",
+    ]
+    last = None
+    for msg in turns:
+        history.append({"role": "user", "content": msg})
+        last = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            order_value=478,
+            trust_score=ctx["trust"]["score"],
+            kitchen=ctx["kitchen"],
+            fleet=ctx["fleet"],
+            trust=ctx["trust"],
+            order_details={"total_amount": 478},
+            order_items=ctx["order_items"],
+            session_id=session_id,
+        )
+        history.append({"role": "bot", "content": last["message"]})
+
+    assert last is not None
+    assert last["action"] == "replacement"
+    assert "fresh peri peri french fries replacement" in last["message"].lower()
+
+
 def test_invalid_live_capture_escalates_without_compensation():
     session_id = "test:invalid-capture-review"
     clear_session(session_id)

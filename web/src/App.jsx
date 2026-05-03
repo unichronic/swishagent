@@ -4,26 +4,26 @@ import './App.css'
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api'
 const COMPLAINT_CATEGORIES = [
-  { id: 'missing_item', label: 'Few item(s) are missing in my order', hint: 'Something was left out of the order.' },
-  { id: 'wrong_item', label: 'Item(s) delivered are incorrect or wrong', hint: 'You got the wrong dish or the wrong variant.' },
-  { id: 'quality_issue', label: 'Item(s) quality is poor', hint: 'Dry, stale, undercooked, cold, or not up to standard.' },
-  { id: 'spill_or_damage', label: 'Item(s) has spillage issue', hint: 'Leaking, damaged, crushed, or opened in transit.' },
-  { id: 'portion_issue', label: 'Item(s) portion size is not adequate', hint: 'Quantity feels short for what you ordered.' },
-  { id: 'delivery_issue', label: 'I did not receive this order', hint: 'Order marked delivered or delayed beyond expectation.' },
-  { id: 'billing_or_coupon', label: 'Payment and billing related query', hint: 'Charge, coupon, or billing issue for this order.' },
-  { id: 'safety_issue', label: 'Report a safety incident', hint: 'Contamination, allergic risk, or unsafe handling.' },
-  { id: 'other', label: 'Something else', hint: 'Use chat if the issue does not fit the categories above.' },
+  { id: 'missing_item', label: 'Something missing', hint: 'An item, part of an item, or something expected was missing.' },
+  { id: 'wrong_item', label: 'Wrong or different item', hint: 'You got the wrong dish, wrong variant, or something unexpected.' },
+  { id: 'quality_issue', label: 'Quality problem', hint: 'Cold, stale, dry, undercooked, or not up to standard.' },
+  { id: 'spill_or_damage', label: 'Damaged or spilled', hint: 'Leaking, crushed, broken, opened, or damaged in transit.' },
+  { id: 'portion_issue', label: 'Quantity or portion issue', hint: 'The quantity feels less than expected.' },
+  { id: 'delivery_issue', label: 'Delivery problem', hint: 'Late, not received, or marked delivered incorrectly.' },
+  { id: 'billing_or_coupon', label: 'Billing or coupon issue', hint: 'Charge, coupon, or payment problem for this order.' },
+  { id: 'safety_issue', label: 'Safety concern', hint: 'Contamination, allergy risk, or unsafe handling.' },
+  { id: 'other', label: 'Something else', hint: 'Use chat if none of these fit well.' },
 ]
 
 const CATEGORY_CHAT_COPY = {
-  missing_item: 'missing items',
-  wrong_item: 'an incorrect item',
-  quality_issue: 'a quality issue',
-  spill_or_damage: 'a spillage issue',
-  portion_issue: 'a portion issue',
-  delivery_issue: 'a delivery issue',
+  missing_item: 'something missing',
+  wrong_item: 'the wrong item',
+  quality_issue: 'a quality problem',
+  spill_or_damage: 'damage or spillage',
+  portion_issue: 'a quantity issue',
+  delivery_issue: 'a delivery problem',
   billing_or_coupon: 'a billing or coupon issue',
-  safety_issue: 'a safety issue',
+  safety_issue: 'a safety concern',
   other: 'this issue',
 }
 
@@ -183,7 +183,7 @@ function App() {
 
   const buildStructuredComplaint = (userText = '') => {
     const parts = []
-    if (selectedCategory?.label) {
+    if (selectedCategory?.label && selectedCategory.id !== 'other') {
       parts.push(selectedCategory.label)
     }
     if (selectedItemName) {
@@ -245,18 +245,14 @@ function App() {
   }
 
   const handleCategorySelect = (category) => {
+    if (!selectedOrder || !selectedItemName) return
     setSelectedCategory(category)
-    const orderItems = selectedOrder?.orderDetails?.items ?? []
-    if (orderItems.length === 1) {
-      openChatWithIntake(selectedOrder, category, orderItems[0].name)
-      return
-    }
-    setSelectedItemName('')
+    openChatWithIntake(selectedOrder, category, selectedItemName)
   }
 
   const handleItemSelect = (itemName) => {
-    if (!selectedOrder || !selectedCategory) return
-    openChatWithIntake(selectedOrder, selectedCategory, itemName)
+    setSelectedItemName(itemName)
+    setSelectedCategory(null)
   }
 
   const handleFileSelect = (e) => {
@@ -580,59 +576,59 @@ function App() {
           </div>
 
           {!selectedCategory && (
-            <>
-              <div className="intake-heading">Choose the issue that fits best</div>
-              <div className="category-list">
-                {COMPLAINT_CATEGORIES.map((category) => (
-                  <button
-                    key={category.id}
-                    className="category-card"
-                    onClick={() => handleCategorySelect(category)}
-                  >
-                    <span className="category-text">{category.label}</span>
-                    <span className="category-arrow">›</span>
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
+            !selectedItemName ? (
+              <>
+                <div className="intake-heading">Which item is affected?</div>
+                <div className="item-list">
+                  {orderItems.map((item) => (
+                    <button
+                      key={item.name}
+                      className="item-card"
+                      onClick={() => handleItemSelect(item.name)}
+                    >
+                      <div className="item-card-main">
+                        <span className="item-card-name">{item.name}</span>
+                        <span className="item-card-desc">{item.description}</span>
+                      </div>
+                      <span className="item-card-price">₹{item.price}</span>
+                    </button>
+                  ))}
+                  {orderItems.length > 1 && (
+                    <button
+                      className="item-card item-card-full"
+                      onClick={() => handleItemSelect('Entire order')}
+                    >
+                      <div className="item-card-main">
+                        <span className="item-card-name">Entire order</span>
+                        <span className="item-card-desc">Use this if the issue is not limited to one item.</span>
+                      </div>
+                    </button>
+                  )}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="intake-heading">What best describes the issue?</div>
+                <div className="intake-selection">
+                  <span className="selection-label">Item</span>
+                  <span className="selection-value">{selectedItemName}</span>
+                  <button className="selection-change" onClick={() => setSelectedItemName('')}>Change</button>
+                </div>
 
-          {selectedCategory && (
-            <>
-              <div className="intake-heading">Which item is affected?</div>
-              <div className="intake-selection">
-                <span className="selection-label">Issue</span>
-                <span className="selection-value">{selectedCategory.label}</span>
-                <button className="selection-change" onClick={() => setSelectedCategory(null)}>Change</button>
-              </div>
-
-              <div className="item-list">
-                {orderItems.map((item) => (
-                  <button
-                    key={item.name}
-                    className="item-card"
-                    onClick={() => handleItemSelect(item.name)}
-                  >
-                    <div className="item-card-main">
-                      <span className="item-card-name">{item.name}</span>
-                      <span className="item-card-desc">{item.description}</span>
-                    </div>
-                    <span className="item-card-price">₹{item.price}</span>
-                  </button>
-                ))}
-                {orderItems.length > 1 && (
-                  <button
-                    className="item-card item-card-full"
-                    onClick={() => handleItemSelect('Entire order')}
-                  >
-                    <div className="item-card-main">
-                      <span className="item-card-name">Entire order</span>
-                      <span className="item-card-desc">Use this if the issue is not limited to one item.</span>
-                    </div>
-                  </button>
-                )}
-              </div>
-            </>
+                <div className="category-list">
+                  {COMPLAINT_CATEGORIES.map((category) => (
+                    <button
+                      key={category.id}
+                      className="category-card"
+                      onClick={() => handleCategorySelect(category)}
+                    >
+                      <span className="category-text">{category.label}</span>
+                      <span className="category-arrow">›</span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )
           )}
         </div>
       </div>
