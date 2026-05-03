@@ -117,6 +117,8 @@ def _assess_case(
                 'issue_severity=["low","medium","high"], '
                 'dietary_severity=["none","low","medium","high"], '
                 'fault_hint=["kitchen","delivery","unclear"], '
+                'dietary_direction=["none","nonveg_in_veg","veg_in_nonveg","allergen","unknown"], '
+                'resolution_change=["none","refund_after_replacement","replacement_after_refund","refund_after_coupon","replacement_after_coupon"], '
                 'economic_preference=["coupon","refund","replacement","escalate"], '
                 'tone_guardrail=["neutral","sensitive","persuasive","operational"], '
                 'negotiation_strength=["none","light","medium"], '
@@ -137,6 +139,7 @@ def _assess_case(
                 "Semantic safety guidance: set selected_item_conflict=true when the structured/picked item or prior item conflicts with the item the customer is actually describing. "
                 "If selected_item_conflict=true, set mentioned_item_name to the closest order item the customer appears to mean and recommended_next_step=clarify unless the customer clearly corrected the item. "
                 "Set semantic_risk=true when common sense says the deterministic flow may act on the wrong item, wrong issue, wrong category, or unsafe dietary interpretation. Set semantic_confidence from 0 to 1. "
+                "Set dietary_direction explicitly: nonveg_in_veg for meat/egg/chicken in veg/vegetarian food; veg_in_nonveg for plant/vegetable in meat/non-veg food; allergen for allergy/allergen risk; none otherwise. "
                 "Dietary asymmetry: non-veg in veg/vegetarian food is high dietary_severity and foreign_object/sensitive; vegetable/veg in non-veg food is usually low dietary_severity and quality/prep mix-up unless the customer mentions allergy, religion, or a strict dietary restriction that makes it serious. "
                 "Visual-evidence guidance: usually true for wrong_item, missing_item in multi-item orders, damaged, spill_leak, and foreign_object; usually false for quality, temperature, delay, and portion_size. "
                 "Set issue_confidence, requested_resolution_confidence, turn_act_confidence, and info_query_confidence as numbers from 0 to 1. "
@@ -147,6 +150,7 @@ def _assess_case(
                 "Prefer replacement when Swish can realistically remake the affected item and that is more useful to the customer than a cash refund. "
                 "Prefer refund only when the item/order failure is clear, replacement is not the right fix, or the complaint is serious enough that cash back is the fair resolution. "
                 "Set turn_act to describe what the user is doing in this turn: confirming, rejecting, switching what they want, asking status, or asking cause. "
+                "Set resolution_change when the customer asks to change an already active resolution, for example refund_after_replacement when they ask for refund after replacement was approved. "
                 "Set recommended_next_step to the most sensible immediate support move, but do not assume you can override policy. Use clarify when the latest user turn is too ambiguous to act on safely. "
                 "Set economic_confidence as a number from 0 to 1. "
                 "Set tone_guardrail to the safest conversational mode for the next reply: "
@@ -175,7 +179,7 @@ def _assess_case(
                 f"Fleet: {fleet}\n"
                 f"Trust: {trust}\n"
                 "If the text is messy, first mentally normalize what the customer probably meant, then classify it.\n"
-                'Return JSON only with keys: issue_type, issue_confidence, requested_resolution, requested_resolution_confidence, info_query, info_query_confidence, assurance_query, turn_act, turn_act_confidence, issue_severity, active_item_name, selected_item_conflict, mentioned_item_name, semantic_risk, semantic_confidence, semantic_risk_reason, dietary_severity, visual_evidence_useful, fault_hint, recommended_next_step, clarification_needed, economic_preference, economic_confidence, tone_guardrail, negotiation_allowed, negotiation_strength, notes.'
+                'Return JSON only with keys: issue_type, issue_confidence, requested_resolution, requested_resolution_confidence, info_query, info_query_confidence, assurance_query, turn_act, turn_act_confidence, issue_severity, active_item_name, selected_item_conflict, mentioned_item_name, semantic_risk, semantic_confidence, semantic_risk_reason, dietary_severity, dietary_direction, visual_evidence_useful, fault_hint, recommended_next_step, clarification_needed, resolution_change, economic_preference, economic_confidence, tone_guardrail, negotiation_allowed, negotiation_strength, notes.'
             ),
         },
     ]

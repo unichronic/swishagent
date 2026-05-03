@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from difflib import SequenceMatcher
 import re
 
+from semantic_policy import SemanticFacts, normalize_semantic_facts
 from session_store import SESSION_TTL_SECONDS, store as session_store
 
 PHYSICAL_ISSUE_TYPES = {"damaged", "spill_leak", "wrong_item", "missing_item", "foreign_object"}
@@ -135,6 +136,11 @@ class Rules:
         assessed_negotiation_strength = Rules._validated_enum(
             assessment.get("negotiation_strength"), Rules.ALLOWED_NEGOTIATION_STRENGTHS
         )
+        semantic_facts = normalize_semantic_facts(
+            text=user_text,
+            assessment=assessment,
+            state=state,
+        )
         structured_selected_item_name = Rules._structured_selected_item_name(complaint, order_items)
         customer_free_text = Rules._customer_free_text(complaint)
         customer_mentioned_item = Rules._match_item(order_items, customer_free_text) if customer_free_text else {}
@@ -255,15 +261,19 @@ class Rules:
             issue_type = state.get("issue_type", issue_type)
         if photo_url and state.get("issue_type"):
             issue_type = state.get("issue_type", issue_type)
-        prep_anomaly = Rules._looks_like_prep_anomaly(user_text)
+        prep_anomaly = semantic_facts.prep_anomaly
         state["prep_anomaly"] = prep_anomaly
-        if issue_type == "foreign_object" and prep_anomaly:
+        benign_veg_in_nonveg = semantic_facts.benign_ingredient_mismatch
+        if issue_type == "foreign_object" and (prep_anomaly or benign_veg_in_nonveg):
             issue_type = "quality"
         issue_type = Rules._strong_text_issue_override(user_text, issue_type)
         semantic_confidence = assessed_semantic_confidence
         if semantic_confidence is None:
             semantic_confidence = assessed_issue_confidence or 0.0
-        if assessed_dietary_severity == "high" and semantic_confidence >= 0.5:
+        serious_dietary_violation = semantic_facts.serious_dietary_violation or (
+            assessed_dietary_severity == "high" and semantic_confidence >= 0.5
+        )
+        if serious_dietary_violation and not (prep_anomaly or benign_veg_in_nonveg):
             issue_type = "foreign_object"
         strong_new_issue_from_info = (
             state.get("case_issue_type") == "info_query"
@@ -288,6 +298,15 @@ class Rules:
             assessed_selected_item_conflict = False
             assessed_semantic_risk = False
             assessed_semantic_risk_reason = None
+        if (
+            (semantic_facts.benign_ingredient_mismatch or semantic_facts.serious_dietary_violation)
+            and not assessed_selected_item_conflict
+        ):
+            assessed_semantic_risk = False
+            assessed_semantic_risk_reason = None
+            assessed_clarification_needed = False
+            if assessed_recommended_next_step == "clarify":
+                assessed_recommended_next_step = "explain"
         assurance_query = bool(assessed_assurance_query) or (False if assessment_provided else Rules._detect_assurance_query(complaint))
         turn_act = Rules._choose_turn_act(
             assessed_turn_act=assessed_turn_act,
@@ -298,7 +317,7 @@ class Rules:
             wants=wants,
             info_query=info_query,
         ) or ("none" if assessment_provided else Rules._detect_turn_act(complaint, wants, info_query))
-        if Rules._should_inherit_case_issue_type(
+        if not (semantic_facts.benign_ingredient_mismatch or semantic_facts.serious_dietary_violation) and Rules._should_inherit_case_issue_type(
             text=user_text,
             state=state,
             issue_type=issue_type,
@@ -313,7 +332,9 @@ class Rules:
         if prep_anomaly:
             fault = "kitchen"
         issue_severity = Rules._choose_issue_severity(issue_type, assessed_issue_severity, assessed_issue_confidence, kitchen, fleet)
-        if assessed_dietary_severity == "high" and semantic_confidence >= 0.5:
+        if (prep_anomaly or benign_veg_in_nonveg) and issue_type == "quality" and issue_severity == "high":
+            issue_severity = "medium"
+        if serious_dietary_violation and not (prep_anomaly or benign_veg_in_nonveg):
             issue_severity = "high"
         explicit_comp = wants in {"refund", "replacement", "coupon", "credit"}
         current_turn_has_photo = bool(photo_url)
@@ -788,6 +809,7 @@ class Rules:
                 trust_score=trust_score,
                 clarification_needed=clarification_needed,
                 recommended_next_step=assessed_recommended_next_step,
+                semantic_facts=semantic_facts,
             )
 
         Rules._mark_terminal_action(state, response, item_name)
@@ -847,8 +869,10 @@ class Rules:
         trust_score: float,
         clarification_needed: bool,
         recommended_next_step: Optional[str],
+        semantic_facts: Optional[SemanticFacts] = None,
     ) -> Dict[str, Any]:
         issue_severity = state.get("issue_severity", "medium")
+        semantic_facts = semantic_facts or SemanticFacts()
         if clarification_needed and wants == "none" and info_query == "none" and not assurance_query:
             state["pending"] = None
             return {
@@ -925,7 +949,9 @@ class Rules:
                 "reason": "User asked for the cause of an identified issue",
             }
 
-        if wants == "refund" and state.get("last_action") == "replacement":
+        if (wants == "refund" and state.get("last_action") == "replacement") or (
+            semantic_facts.resolution_change == "refund_after_replacement"
+        ):
             if Rules._refund_allowed(
                 trust_score=trust_score,
                 issue_severity=state.get("case_issue_severity", state.get("issue_severity", issue_type)),
@@ -941,10 +967,12 @@ class Rules:
                 }
             state["pending"] = None
             state["desired_resolution"] = None
+            state["approved_replacement_status"] = "cancel_requested_for_refund_review"
+            state["replacement_change_requested"] = "refund"
             return {
                 "action": "escalate",
                 "amount": 0.0,
-                "message": "The replacement is already approved. If you want that changed to a refund instead, I need to send it for review.",
+                "message": "I’ve marked the replacement to be cancelled and sent the refund change for review. If fulfillment had already picked it up, the team will handle that with the review.",
                 "reason": "Refund requested after replacement approval but cannot be auto-converted",
             }
 
@@ -2642,6 +2670,8 @@ class Rules:
     def _looks_like_dietary_violation(text: str) -> bool:
         if not text:
             return False
+        if Rules._looks_like_benign_veg_in_nonveg(text):
+            return False
         allergen_markers = ["allergy", "allergic", "allergen"]
         allergen_terms = [
             "peanut",
@@ -2681,6 +2711,32 @@ class Rules:
         return bool(re.search(r"\b(piece|bits?|chunks?)\s+of\s+(chick(?:en)?|egg|meat|fish|mutton|beef|prawn|pork)\b", text))
 
     @staticmethod
+    def _looks_like_benign_veg_in_nonveg(text: str) -> bool:
+        if not text:
+            return False
+        serious_markers = [
+            "allergy",
+            "allergic",
+            "allergen",
+            "religion",
+            "religious",
+            "fasting",
+            "vrat",
+            "jain",
+        ]
+        if any(marker in text for marker in serious_markers):
+            return False
+        plant_pattern = r"(?:vegetable|vegetables|veggie|veggies|veg|onion|capsicum|pepper|corn|herb|masala)"
+        nonveg_pattern = r"(?:non veg|non-veg|chicken|meat|fish|mutton|beef|prawn|pork)"
+        nonveg_in_veg_pattern = r"(?:chicken|meat|fish|mutton|beef|prawn|pork).{0,50}(?:veg|vegetarian|paneer)"
+        if re.search(rf"\b{nonveg_in_veg_pattern}\b", text):
+            return False
+        return bool(
+            re.search(rf"\b{plant_pattern}\b.{{0,60}}\b{nonveg_pattern}\b", text)
+            or re.search(rf"\b{nonveg_pattern}\b.{{0,60}}\b(?:vegetable|vegetables|veggie|veggies|onion|capsicum|pepper|corn|herb|masala)\b", text)
+        )
+
+    @staticmethod
     def _looks_like_ingredient_mismatch(text: str) -> bool:
         if not text:
             return False
@@ -2698,6 +2754,7 @@ class Rules:
         ]
         mismatch_phrases = [
             r"\bpiece of (?:a |an )?(vegetable|veggies|onion|capsicum|pepper|corn)\b",
+            r"\b(vegetable|veggies|onion|capsicum|pepper|corn)\s+piece\b",
             r"\b(extra|unexpected|wrong)\s+(vegetable|veggies|onion|capsicum|pepper|corn|sauce)\b",
         ]
         if any(re.search(pattern, text) for pattern in mismatch_phrases):
@@ -3668,7 +3725,7 @@ class Rules:
 
         if fault == "kitchen":
             if (state or {}).get("prep_anomaly"):
-                return f"{prefix}This looks like an ingredient mix-up on the {item_name}, not a wrong-item or safety issue from what I can see."
+                return f"{prefix}This looks like an ingredient mix-up on the {item_name}, so I’m treating it as a prep-side quality issue."
             quality = kitchen.get("quality_out") or "fair"
             if quality == "fair":
                 return f"{prefix}The kitchen check for the {item_name} was only marked fair, so I'm noting this as a prep-side quality issue."
@@ -3785,6 +3842,8 @@ class Rules:
             or state.get("active_item_name")
             or "replacement"
         )
+        if state.get("approved_replacement_status") == "cancel_requested_for_refund_review":
+            return f"The fresh {item_name} is no longer being treated as the active fix in this chat. I’ve marked it to be cancelled and sent your refund change for review."
         return f"The fresh {item_name} has already been approved. I don't have a live ETA here yet, but these usually go out in around 15 to 20 mins and you'll see the update in-app."
 
     @staticmethod

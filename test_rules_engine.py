@@ -471,31 +471,8 @@ def test_semantic_clarification_confirmation_keeps_original_issue_context():
 
     assert clarification["action"] == "info"
     assert "right item" not in clarification["message"].lower()
-    assert get_session_state(session_id).get("pending") == "semantic_clarification"
-
-    history.append({"role": "user", "content": "yes"})
-    confirmed = Rules.resolve(
-        complaint="yes",
-        conversation_history=history,
-        order_value=269,
-        trust_score=ctx["trust"]["score"],
-        kitchen=ctx["kitchen"],
-        fleet=ctx["fleet"],
-        trust=ctx["trust"],
-        order_details={"total_amount": 269},
-        order_items=ctx["order_items"],
-        session_id=session_id,
-        assessment={
-            "turn_act": "confirm",
-            "turn_act_confidence": 0.9,
-            "issue_type": "other",
-            "issue_confidence": 0.2,
-        },
-    )
-
-    assert confirmed["action"] == "info"
-    assert "prep-side quality issue" in confirmed["message"].lower()
-    assert "logs still don't point" not in confirmed["message"].lower()
+    assert "prep-side quality issue" in clarification["message"].lower()
+    assert "logs still don't point" not in clarification["message"].lower()
     assert get_session_state(session_id).get("pending") is None
 
 
@@ -1281,6 +1258,7 @@ def test_replacement_status_survives_refund_review_request():
     assert refund_review["action"] == "escalate"
     assert get_session_state(session_id).get("last_action") == "escalate"
     assert get_session_state(session_id).get("approved_replacement_item_name") == "Dark Chocolate Oreo Shake"
+    assert get_session_state(session_id).get("approved_replacement_status") == "cancel_requested_for_refund_review"
 
     history.append({"role": "user", "content": "in how much time will my replacemetn arrive?"})
     status = Rules.resolve(
@@ -1304,7 +1282,9 @@ def test_replacement_status_survives_refund_review_request():
 
     assert status["action"] == "info"
     assert status["reason"] == "User asked for approved replacement status"
-    assert "15 to 20 mins" in status["message"]
+    assert "cancelled" in status["message"].lower()
+    assert "refund change for review" in status["message"].lower()
+    assert "15 to 20 mins" not in status["message"]
     assert "already marked for review" not in status["message"].lower()
 
 
@@ -2713,7 +2693,8 @@ def test_refund_request_after_replacement_approval_does_not_restart_coupon_loop(
         history.append({"role": "bot", "content": result["message"]})
 
     assert result["action"] == "escalate"
-    assert "replacement is already approved" in result["message"].lower()
+    assert "cancelled" in result["message"].lower()
+    assert "refund change for review" in result["message"].lower()
 
 
 def test_replacement_intent_in_coupon_state_is_not_misread_as_coupon_acceptance():
@@ -3563,6 +3544,42 @@ def test_llm_high_dietary_severity_can_upgrade_common_sense_safety_case():
     assert result["_debug"]["dietary_severity"] == "high"
 
 
+def test_resolved_dietary_direction_does_not_trigger_vague_semantic_clarification():
+    session_id = "test:semantic-dietary-no-vague-clarify"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    complaint = "there is chicken in my veg pasta and I am vegetarian"
+    history.append({"role": "user", "content": complaint})
+    result = Rules.resolve(
+        complaint=complaint,
+        conversation_history=history,
+        order_value=219,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 8, "temperature_check": "hot"},
+        fleet={"delay_mins": 4, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 219},
+        order_items={"items": [{"name": "Veg Pink Sauce Pasta", "price": 219}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "quality",
+            "issue_confidence": 0.88,
+            "active_item_name": "Veg Pink Sauce Pasta",
+            "dietary_severity": "high",
+            "dietary_direction": "nonveg_in_veg",
+            "semantic_risk": True,
+            "semantic_confidence": 0.9,
+            "recommended_next_step": "clarify",
+            "clarification_needed": True,
+        },
+    )
+
+    assert result["_debug"]["issue_type"] == "foreign_object"
+    assert result["reason"] != "LLM semantic guard requested clarification"
+    assert "different issue from the option selected" not in result["message"].lower()
+
+
 def test_llm_low_dietary_severity_keeps_veg_in_nonveg_as_prep_quality_issue():
     session_id = "test:semantic-dietary-low"
     clear_session(session_id)
@@ -3594,3 +3611,38 @@ def test_llm_low_dietary_severity_keeps_veg_in_nonveg_as_prep_quality_issue():
     assert result["_debug"]["issue_type"] == "quality"
     assert result["_debug"]["dietary_severity"] == "low"
     assert "wrong item" not in result["message"].lower()
+
+
+def test_llm_high_dietary_overcall_does_not_turn_veg_in_nonveg_into_safety_case():
+    session_id = "test:semantic-dietary-high-overcall-veg-in-nonveg"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    complaint = "there was a vegetable piece in my chicken bowl"
+    history.append({"role": "user", "content": complaint})
+    result = Rules.resolve(
+        complaint=complaint,
+        conversation_history=history,
+        order_value=269,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 8, "temperature_check": "hot"},
+        fleet={"delay_mins": 4, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 269},
+        order_items={"items": [{"name": "Butter Chicken Rice Bowl", "price": 269}]},
+        session_id=session_id,
+        assessment={
+            "issue_type": "foreign_object",
+            "issue_confidence": 0.92,
+            "issue_severity": "high",
+            "active_item_name": "Butter Chicken Rice Bowl",
+            "dietary_severity": "high",
+            "semantic_risk": True,
+            "semantic_confidence": 0.91,
+            "fault_hint": "kitchen",
+        },
+    )
+
+    assert result["_debug"]["issue_type"] == "quality"
+    assert result["_debug"]["issue_severity"] != "high"
+    assert "safety" not in result["message"].lower()

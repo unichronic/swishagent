@@ -25,9 +25,9 @@ def test_assessment_eval_parses_valid_json(monkeypatch):
             '"assurance_query":false,"turn_act":"switch_resolution","turn_act_confidence":0.74,'
             '"issue_severity":"medium","active_item_name":"Classic Maggi","selected_item_conflict":false,'
             '"mentioned_item_name":"Classic Maggi","semantic_risk":false,"semantic_confidence":0.9,'
-            '"semantic_risk_reason":"","dietary_severity":"none","visual_evidence_useful":true,'
+            '"semantic_risk_reason":"","dietary_severity":"none","dietary_direction":"none","visual_evidence_useful":true,'
             '"fault_hint":"kitchen","recommended_next_step":"coupon","clarification_needed":false,'
-            '"economic_preference":"refund","economic_confidence":0.8,"tone_guardrail":"neutral",'
+            '"resolution_change":"none","economic_preference":"refund","economic_confidence":0.8,"tone_guardrail":"neutral",'
             '"negotiation_allowed":true,"negotiation_strength":"light","notes":"test"}'
         )
 
@@ -50,6 +50,8 @@ def test_assessment_eval_parses_valid_json(monkeypatch):
     assert "selected_item_conflict" in prompt_text
     assert "semantic_risk" in prompt_text
     assert "dietary_severity" in prompt_text
+    assert "dietary_direction" in prompt_text
+    assert "resolution_change" in prompt_text
 
 
 def test_assessment_eval_marks_invalid_json(monkeypatch):
