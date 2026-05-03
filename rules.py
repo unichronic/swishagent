@@ -1018,8 +1018,11 @@ class Rules:
                 "reason": "User asked for the cause of an identified issue",
             }
 
-        if (wants == "refund" and state.get("last_action") == "replacement") or (
-            semantic_facts.resolution_change == "refund_after_replacement"
+        approved_replacement_active = state.get("last_action") == "replacement" or (
+            state.get("approved_replacement_status") == case_flow.APPROVED_REPLACEMENT
+        )
+        if (wants == "refund" and approved_replacement_active) or (
+            semantic_facts.resolution_change == "refund_after_replacement" and approved_replacement_active
         ):
             if Rules._refund_allowed(
                 trust_score=trust_score,
@@ -1342,7 +1345,15 @@ class Rules:
 
         if preferred_resolution == "replacement":
             state["coupon_push_count"] = push_count + 1
-            case_flow.set_pending_replacement_confirmation(state)
+            state["replacement_steered_from_refund"] = True
+            if refund_requested and state["coupon_push_count"] > 1:
+                case_flow.clear_resolution(state)
+                return {
+                    "action": "escalate",
+                    "amount": 0.0,
+                    "message": Rules._review_escalation_message("refund"),
+                    "reason": "Refund requested after replacement steering but requires review",
+                }
             return {
                 "action": "info",
                 "amount": 0.0,

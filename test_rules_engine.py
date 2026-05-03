@@ -3522,6 +3522,110 @@ def test_repeated_refund_pressure_after_replacement_steer_moves_to_review():
     assert second["action"] == "escalate"
 
 
+def test_refund_steering_does_not_create_unconfirmed_replacement_pending_state():
+    session_id = "test:refund-steer-not-replacement-pending"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    ctx = _base_context()
+    ctx["order_items"] = {"items": [{"name": "Classic Cold Coffee", "price": 269}]}
+    common = {
+        "order_value": 478,
+        "trust_score": 92,
+        "kitchen": {"quality_out": "good", "prep_time_mins": 8, "temperature_check": "cold"},
+        "fleet": {"delay_mins": 1, "traffic_flag": False},
+        "trust": ctx["trust"],
+        "order_details": {"total_amount": 478},
+        "order_items": ctx["order_items"],
+        "session_id": session_id,
+    }
+
+    turns = [
+        (
+            "i got a different drink",
+            {
+                "issue_type": "wrong_item",
+                "issue_confidence": 0.9,
+                "active_item_name": "Classic Cold Coffee",
+            },
+            None,
+            None,
+        ),
+        (
+            "i need my refund",
+            {
+                "issue_type": "wrong_item",
+                "issue_confidence": 0.9,
+                "requested_resolution": "refund",
+                "requested_resolution_confidence": 0.95,
+                "active_item_name": "Classic Cold Coffee",
+            },
+            "https://example.com/proof.jpg",
+            True,
+        ),
+        (
+            "i need refund",
+            {
+                "issue_type": "wrong_item",
+                "issue_confidence": 0.9,
+                "requested_resolution": "refund",
+                "requested_resolution_confidence": 0.95,
+                "turn_act": "switch_resolution",
+                "turn_act_confidence": 0.95,
+                "economic_preference": "replacement",
+                "economic_confidence": 0.9,
+                "active_item_name": "Classic Cold Coffee",
+            },
+            None,
+            None,
+        ),
+    ]
+
+    for msg, assessment, photo_url, photo_valid in turns:
+        if photo_url:
+            mark_photo_provided(session_id)
+        history.append({"role": "user", "content": msg})
+        result = Rules.resolve(
+            complaint=msg,
+            conversation_history=history,
+            assessment=assessment,
+            photo_url=photo_url,
+            photo_valid=photo_valid,
+            photo_in_session=session_has_photo(session_id),
+            **common,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+
+    state = get_session_state(session_id)
+    assert result["action"] == "info"
+    assert "fresh classic cold coffee" in result["message"].lower()
+    assert state.get("pending") == "coupon"
+    assert state.get("desired_resolution") == "refund"
+    assert state.get("last_action") != "replacement"
+
+    history.append({"role": "user", "content": "no i never confirmed replacement give me refund"})
+    result = Rules.resolve(
+        complaint="no i never confirmed replacement give me refund",
+        conversation_history=history,
+        assessment={
+            "issue_type": "wrong_item",
+            "issue_confidence": 0.9,
+            "requested_resolution": "refund",
+            "requested_resolution_confidence": 0.95,
+            "turn_act": "switch_resolution",
+            "turn_act_confidence": 0.95,
+            "economic_preference": "replacement",
+            "economic_confidence": 0.9,
+            "active_item_name": "Classic Cold Coffee",
+        },
+        **common,
+    )
+
+    assert result["action"] == "escalate"
+    assert "refund" in result["message"].lower()
+    assert get_session_state(session_id).get("last_action") != "replacement"
+
+
 def test_active_issue_followup_is_not_routed_to_order_status():
     session_id = "test-active-issue-not-order-status"
     clear_session(session_id)
