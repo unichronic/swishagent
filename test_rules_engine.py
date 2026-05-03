@@ -2697,6 +2697,47 @@ def test_refund_request_after_replacement_approval_does_not_restart_coupon_loop(
     assert "refund change for review" in result["message"].lower()
 
 
+def test_pending_replacement_status_question_does_not_confirm_replacement():
+    session_id = "test:pending-replacement-status-not-confirmation"
+    clear_session(session_id)
+
+    state = get_session_state(session_id)
+    state["pending"] = "replacement_confirm"
+    state["desired_resolution"] = "replacement"
+    state["case_issue_type"] = "spill_leak"
+    state["issue_type"] = "spill_leak"
+    state["active_item_name"] = "Classic Maggi"
+    state["order_value"] = 168
+    state["evidence_strength"] = "strong"
+
+    history = get_session(session_id)
+    history.append({"role": "bot", "content": "I can get a fresh Classic Maggi remade for you instead. Want me to go ahead with that?"})
+    complaint = "in how much time will my replacement arrive?"
+    history.append({"role": "user", "content": complaint})
+
+    result = Rules.resolve(
+        complaint=complaint,
+        conversation_history=history,
+        order_value=168,
+        trust_score=92,
+        kitchen={"quality_out": "fair", "prep_time_mins": 6, "temperature_check": "warm"},
+        fleet={"delay_mins": 4, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 168},
+        order_items={"items": [{"name": "Classic Maggi", "price": 79}]},
+        session_id=session_id,
+    )
+
+    assert result["action"] == "info"
+    assert result["reason"] in {
+        "User asked for active complaint status",
+        "User asked about pending replacement status",
+    }
+    assert "need you to confirm" in result["message"].lower()
+    assert get_session_state(session_id).get("pending") == "replacement_confirm"
+    assert get_session_state(session_id).get("last_action") != "replacement"
+
+
 def test_replacement_intent_in_coupon_state_is_not_misread_as_coupon_acceptance():
     session_id = "test:replacement-not-coupon-accept"
     clear_session(session_id)

@@ -5,6 +5,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY agent_service.py llm_client.py tools.py rules.py semantic_policy.py support_state.py guardrails.py order_data.py \
+COPY agent_service.py llm_client.py tools.py rules.py semantic_policy.py resolution_policy.py case_flow.py issue_signals.py support_state.py guardrails.py order_data.py \
      session_store.py tracing.py fraud_service.py \
      order_service.py kitchen_service.py fleet_service.py trust_service.py data_service.py ./

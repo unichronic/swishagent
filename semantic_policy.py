@@ -168,7 +168,15 @@ def _detect_resolution_change(text: str, state: Dict[str, Any]) -> str:
 
 
 def _is_replacement_status_query(text: str, state: Dict[str, Any]) -> bool:
-    if not state.get("approved_replacement_item_name") or not text:
+    if not text:
+        return False
+    replacement_is_relevant = bool(
+        state.get("approved_replacement_item_name")
+        or state.get("pending") == "replacement_confirm"
+        or state.get("desired_resolution") == "replacement"
+        or state.get("last_action") == "replacement"
+    )
+    if not replacement_is_relevant:
         return False
     replacement_terms = ["replacement", "replacemetn", "replace", "remake", "fresh item", "fresh one"]
     status_terms = [

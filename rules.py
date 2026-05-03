@@ -12,6 +12,9 @@ from typing import Any, Dict, List, Optional
 from difflib import SequenceMatcher
 import re
 
+import case_flow
+import issue_signals
+import resolution_policy
 from semantic_policy import SemanticFacts, normalize_semantic_facts
 from session_store import SESSION_TTL_SECONDS, store as session_store
 
@@ -38,6 +41,16 @@ class Rules:
     MAX_COUPON_REINFORCEMENT_TURNS = 2
     MAX_HIGH_SEVERITY_REPLACEMENT_NEGOTIATION_TURNS = 1
     MIN_REPLACEMENT_NEGOTIATION_MARGIN = 60
+    RESOLUTION_POLICY_CONFIG = resolution_policy.ResolutionPolicyConfig(
+        high_value_threshold=HIGH_VALUE_THRESHOLD,
+        low_value_refund_threshold=LOW_VALUE_REFUND_THRESHOLD,
+        refund_trust_threshold=REFUND_TRUST_THRESHOLD,
+        standard_coupon_amount=STANDARD_COUPON_AMOUNT,
+        estimated_replacement_overhead=ESTIMATED_REPLACEMENT_OVERHEAD,
+        max_coupon_reinforcement_turns=MAX_COUPON_REINFORCEMENT_TURNS,
+        max_high_severity_replacement_negotiation_turns=MAX_HIGH_SEVERITY_REPLACEMENT_NEGOTIATION_TURNS,
+        min_replacement_negotiation_margin=MIN_REPLACEMENT_NEGOTIATION_MARGIN,
+    )
 
     ALLOWED_ISSUE_TYPES = {
         "quality",
@@ -415,10 +428,7 @@ class Rules:
             case_issue_severity = issue_severity
             case_evidence_strength = evidence_strength
             case_economic_preference = economic_preference
-        if issue_type == "info_query" and (not prior_case_issue_type or prior_case_issue_type == "info_query"):
-            state["conversation_mode"] = "info_only"
-        elif issue_type != "info_query":
-            state["conversation_mode"] = "active_complaint"
+        case_flow.set_conversation_mode_for_issue(state, issue_type, prior_case_issue_type)
         coupon_amount = Rules._coupon_amount(order_value, item.get("price"))
         coupon_amount = Rules._adjust_coupon_amount(
             coupon_amount=coupon_amount,
@@ -452,12 +462,11 @@ class Rules:
             state["last_info_query"] = info_query
         if issue_type == "delay" and wants == "replacement":
             wants = "coupon"
-            state["desired_resolution"] = "coupon"
-            state["economic_preference"] = "coupon"
+            case_flow.force_delay_resolution_to_coupon(state)
             economic_preference = "coupon"
 
         if state.get("pending") == "photo" and current_turn_has_photo and photo_valid is not False:
-            state["pending"] = None
+            case_flow.clear_pending(state)
 
         if state.get("pending") == "semantic_clarification":
             if Rules._accepted(user_text) or turn_act == "confirm":
@@ -465,13 +474,12 @@ class Rules:
                 confirmed_issue_type = state.get("pending_semantic_issue_type") or prior_case_issue_type or issue_type
                 confirmed_fault = state.get("pending_semantic_fault") or fault
                 confirmed_prep_anomaly = bool(state.get("pending_semantic_prep_anomaly"))
-                state["pending"] = None
-                state["desired_resolution"] = None
-                state["issue_type"] = confirmed_issue_type
-                state["case_issue_type"] = confirmed_issue_type
-                state["conversation_mode"] = "active_complaint"
-                state["active_item_name"] = confirmed_item_name
-                state["prep_anomaly"] = confirmed_prep_anomaly
+                case_flow.confirm_semantic_clarification(
+                    state,
+                    item_name=confirmed_item_name,
+                    issue_type=confirmed_issue_type,
+                    prep_anomaly=confirmed_prep_anomaly,
+                )
                 response = {
                     "action": "info",
                     "amount": 0.0,
@@ -485,8 +493,7 @@ class Rules:
                 }
                 return Rules._enforce_content(response, state)
             if Rules._has_concrete_issue_signal(user_text):
-                state["pending"] = None
-                state["desired_resolution"] = None
+                case_flow.clear_resolution(state)
 
         if is_abusive:
             response = {
@@ -506,14 +513,15 @@ class Rules:
             recommended_next_step=assessed_recommended_next_step,
             clarification_needed=assessed_clarification_needed,
         ):
-            state["pending"] = "semantic_clarification"
-            state["pending_semantic_item_name"] = item_name
-            state["pending_semantic_issue_type"] = issue_type
-            state["pending_semantic_fault"] = fault
-            state["pending_semantic_prep_anomaly"] = prep_anomaly
-            state["pending_semantic_message"] = complaint
-            state["pending_semantic_reason"] = assessed_semantic_risk_reason
-            state["desired_resolution"] = None
+            case_flow.set_pending_semantic_clarification(
+                state,
+                item_name=item_name,
+                issue_type=issue_type,
+                fault=fault,
+                prep_anomaly=prep_anomaly,
+                message=complaint,
+                reason=assessed_semantic_risk_reason,
+            )
             response = {
                 "action": "info",
                 "amount": 0.0,
@@ -557,7 +565,7 @@ class Rules:
             return response
 
         if photo_url and photo_valid is False:
-            state["last_action"] = "escalate"
+            case_flow.mark_escalated(state)
             response = {
                 "action": "escalate",
                 "amount": 0.0,
@@ -570,7 +578,7 @@ class Rules:
         if Rules._is_replacement_status_query(_lower(complaint), state) or (
             state.get("approved_replacement_item_name") and info_query == "status"
         ):
-            state["pending"] = None
+            case_flow.clear_pending(state)
             response = {
                 "action": "info",
                 "amount": 0.0,
@@ -583,13 +591,12 @@ class Rules:
             issue_type = prior_case_issue_type or state.get("case_issue_type", issue_type)
             state["issue_type"] = issue_type
             state["case_issue_type"] = issue_type
-            state["conversation_mode"] = "review"
-            state["escalation_repeat_count"] = int(state.get("escalation_repeat_count") or 0) + 1
+            escalation_repeat_count = case_flow.mark_review_repeat(state)
             response = {
                 "action": "escalate",
                 "amount": 0.0,
                 "message": Rules._review_escalation_message("case")
-                if state["escalation_repeat_count"] <= 1
+                if escalation_repeat_count <= 1
                 else "This is already marked for review. I don't want to keep repeating the same step, and there isn't another auto action I can take in chat.",
                 "reason": "Case already marked for manual review",
             }
@@ -597,12 +604,8 @@ class Rules:
             return Rules._enforce_content(response, state)
 
         if Rules._is_cancel_or_resolved_turn(user_text):
-            state["pending"] = None
-            state["desired_resolution"] = None
-            state["case_resolved_by_user"] = True
-            state["conversation_mode"] = "resolved"
-            state["issue_type"] = prior_case_issue_type or state.get("case_issue_type") or issue_type
-            state["case_issue_type"] = prior_case_issue_type or state.get("case_issue_type") or issue_type
+            resolved_issue_type = prior_case_issue_type or state.get("case_issue_type") or issue_type
+            case_flow.mark_user_resolved(state, issue_type=resolved_issue_type)
             response = {
                 "action": "info",
                 "amount": 0.0,
@@ -617,10 +620,8 @@ class Rules:
             or Rules._is_case_scope_or_support_pressure_turn(user_text)
             or Rules._is_generic_info_followup(user_text)
         ):
-            state["conversation_mode"] = "resolved"
-            state["issue_type"] = prior_case_issue_type or state.get("case_issue_type") or issue_type
-            state["case_issue_type"] = prior_case_issue_type or state.get("case_issue_type") or issue_type
-            state["resolved_repeat_count"] = int(state.get("resolved_repeat_count") or 0) + 1
+            resolved_issue_type = prior_case_issue_type or state.get("case_issue_type") or issue_type
+            resolved_repeat_count = case_flow.preserve_resolved_case_context(state, issue_type=resolved_issue_type)
             resolved_messages = [
                 "Nothing else is open from my side on this order right now.",
                 "You're good here. I haven't taken any refund, coupon, or replacement action.",
@@ -629,15 +630,14 @@ class Rules:
             response = {
                 "action": "info",
                 "amount": 0.0,
-                "message": resolved_messages[(state["resolved_repeat_count"] - 1) % len(resolved_messages)],
+                "message": resolved_messages[(resolved_repeat_count - 1) % len(resolved_messages)],
                 "reason": "Resolved case follow-up",
             }
             Rules._store_terminal_state(state)
             return Rules._enforce_content(response, state)
 
         if state.get("pending") == "photo" and Rules._cannot_provide_photo(user_text):
-            state["pending"] = None
-            state["desired_resolution"] = None
+            case_flow.clear_resolution(state)
             response = {
                 "action": "escalate",
                 "amount": 0.0,
@@ -650,9 +650,7 @@ class Rules:
         if state.get("pending") == "photo" and not current_turn_has_photo:
             state["photo_prompt_count"] = int(state.get("photo_prompt_count") or 0) + 1
             if state["photo_prompt_count"] > 1:
-                state["pending"] = None
-                state["desired_resolution"] = None
-                state["last_action"] = "escalate"
+                case_flow.mark_escalated(state)
                 response = {
                     "action": "escalate",
                     "amount": 0.0,
@@ -669,14 +667,49 @@ class Rules:
             }
             return Rules._enforce_content(response, state)
 
+        pending = state.get("pending")
+        if pending and semantic_facts.replacement_status_query:
+            response = {
+                "action": "info",
+                "amount": 0.0,
+                "message": Rules._active_case_status_message(state, item_name),
+                "reason": "User asked about pending replacement status",
+            }
+            response = Rules._enforce_content(response, state)
+            response["_debug"] = {
+                "issue_type": issue_type,
+                "issue_type_source": "fallback",
+                "issue_confidence": assessed_issue_confidence,
+                "fault": fault,
+                "fault_source": "llm" if fault == assessed_fault_hint and assessed_fault_hint else "fallback",
+                "visual_evidence_useful": needs_visual,
+                "requested_resolution": wants,
+                "active_item_name": item.get("name") or state.get("active_item_name"),
+                "issue_severity": issue_severity,
+                "evidence_strength": evidence_strength,
+                "economic_preference": economic_preference,
+                "turn_act": turn_act,
+                "info_query_confidence": assessed_info_query_confidence,
+                "recommended_next_step": assessed_recommended_next_step or "fallback",
+                "clarification_needed": clarification_needed,
+                "tone_guardrail": tone_guardrail,
+                "negotiation_allowed": negotiation_allowed,
+                "negotiation_strength": negotiation_strength,
+                "selected_item_conflict": assessed_selected_item_conflict,
+                "mentioned_item_name": assessed_mentioned_item_name,
+                "semantic_risk": assessed_semantic_risk,
+                "semantic_confidence": semantic_confidence,
+                "dietary_severity": assessed_dietary_severity or "none",
+            }
+            return response
+
         photo_required = Rules._needs_photo(
             explicit_comp=explicit_comp,
             photo_present=photo_present,
             visual_evidence_useful=needs_visual,
         )
         if photo_required:
-            state["pending"] = "photo"
-            state["desired_resolution"] = wants if wants in {"refund", "replacement"} else None
+            case_flow.set_pending_photo(state, wants)
             response = {
                 "action": "live_capture",
                 "amount": 0.0,
@@ -685,9 +718,10 @@ class Rules:
             }
             return Rules._enforce_content(response, state)
 
-        pending = state.get("pending")
         if pending and info_query != "none":
-            if Rules._is_active_case_status_followup(user_text, state):
+            if Rules._is_active_case_status_followup(user_text, state) or (
+                pending == "replacement_confirm" and info_query == "status"
+            ):
                 response = {
                     "action": "info",
                     "amount": 0.0,
@@ -874,7 +908,7 @@ class Rules:
         issue_severity = state.get("issue_severity", "medium")
         semantic_facts = semantic_facts or SemanticFacts()
         if clarification_needed and wants == "none" and info_query == "none" and not assurance_query:
-            state["pending"] = None
+            case_flow.clear_pending(state)
             return {
                 "action": "info",
                 "amount": 0.0,
@@ -883,7 +917,7 @@ class Rules:
             }
 
         if assurance_query and state.get("last_action") == "replacement":
-            state["pending"] = None
+            case_flow.clear_pending(state)
             return {
                 "action": "info",
                 "amount": 0.0,
@@ -894,7 +928,7 @@ class Rules:
         if Rules._is_replacement_status_query(_lower(complaint), state) or (
             state.get("approved_replacement_item_name") and info_query == "status"
         ):
-            state["pending"] = None
+            case_flow.clear_pending(state)
             return {
                 "action": "info",
                 "amount": 0.0,
@@ -903,20 +937,18 @@ class Rules:
             }
 
         if state.get("last_action") == "escalate" and info_query == "none":
-            state["pending"] = None
-            state["conversation_mode"] = "review"
-            state["escalation_repeat_count"] = int(state.get("escalation_repeat_count") or 0) + 1
+            escalation_repeat_count = case_flow.mark_review_repeat(state)
             return {
                 "action": "escalate",
                 "amount": 0.0,
                 "message": Rules._review_escalation_message("case")
-                if state["escalation_repeat_count"] <= 1
+                if escalation_repeat_count <= 1
                 else "This is already marked for review. I don't want to keep repeating the same step, and there isn't another auto action I can take in chat.",
                 "reason": "Case already marked for manual review",
             }
 
         if state.get("last_action") == "replacement" and info_query == "none" and wants == "replacement":
-            state["pending"] = None
+            case_flow.clear_pending(state)
             return {
                 "action": "info",
                 "amount": 0.0,
@@ -931,8 +963,7 @@ class Rules:
             and wants == "none"
             and bot_count > 0
         ):
-            state["pending"] = None
-            state["desired_resolution"] = None
+            case_flow.clear_resolution(state)
             return {
                 "action": "escalate",
                 "amount": 0.0,
@@ -941,7 +972,7 @@ class Rules:
             }
 
         if info_query != "none" and issue_type != "info_query" and turn_act == "ask_cause":
-            state["pending"] = None
+            case_flow.clear_pending(state)
             return {
                 "action": "info",
                 "amount": 0.0,
@@ -957,18 +988,14 @@ class Rules:
                 issue_severity=state.get("case_issue_severity", state.get("issue_severity", issue_type)),
                 evidence_strength=state.get("case_evidence_strength", state.get("evidence_strength", "weak")),
             ):
-                state["pending"] = "refund_amount"
-                state["desired_resolution"] = "refund"
+                case_flow.set_pending_refund_amount(state)
                 return {
                     "action": "info",
                     "amount": 0.0,
                     "message": "If you want to switch the approved replacement to a refund instead, tell me what refund feels fair here: 25%, 50%, 75%, or full.",
                     "reason": "User wants to switch an approved replacement to refund",
                 }
-            state["pending"] = None
-            state["desired_resolution"] = None
-            state["approved_replacement_status"] = "cancel_requested_for_refund_review"
-            state["replacement_change_requested"] = "refund"
+            case_flow.request_refund_review_after_replacement(state)
             return {
                 "action": "escalate",
                 "amount": 0.0,
@@ -978,14 +1005,14 @@ class Rules:
 
         if info_query != "none":
             if Rules._is_active_case_status_followup(_lower(complaint), state):
-                state["pending"] = None
+                case_flow.clear_pending(state)
                 return {
                     "action": "info",
                     "amount": 0.0,
                     "message": Rules._active_case_status_message(state, item_name),
                     "reason": "User asked for active complaint status",
                 }
-            state["pending"] = None
+            case_flow.clear_pending(state)
             return {
                 "action": "info",
                 "amount": 0.0,
@@ -994,7 +1021,7 @@ class Rules:
             }
 
         if bot_count == 0 and wants == "none":
-            state["pending"] = None
+            case_flow.clear_pending(state)
             return {
                 "action": "info",
                 "amount": 0.0,
@@ -1003,10 +1030,7 @@ class Rules:
             }
 
         if wants in {"coupon", "credit"}:
-            state["pending"] = "coupon"
-            state["desired_resolution"] = "coupon"
-            state["coupon_amount"] = coupon_amount
-            state["coupon_push_count"] = 0
+            case_flow.set_pending_coupon(state, "coupon", coupon_amount)
             return {
                 "action": "info",
                 "amount": 0.0,
@@ -1032,8 +1056,7 @@ class Rules:
 
         if wants in {"refund", "replacement"}:
             if recommended_next_step == "escalate":
-                state["pending"] = None
-                state["desired_resolution"] = None
+                case_flow.clear_resolution(state)
                 return {
                     "action": "escalate",
                     "amount": 0.0,
@@ -1046,18 +1069,14 @@ class Rules:
                 and state.get("evidence_strength") == "strong"
                 and state.get("economic_preference") == "replacement"
             ):
-                state["pending"] = "replacement_confirm"
-                state["desired_resolution"] = "replacement"
+                case_flow.set_pending_replacement_confirmation(state)
                 return {
                     "action": "info",
                     "amount": 0.0,
                     "message": Rules._replacement_confirm_message(item_name),
                     "reason": "Strong evidence supports moving directly to replacement confirmation",
                 }
-            state["pending"] = "coupon"
-            state["desired_resolution"] = wants
-            state["coupon_amount"] = coupon_amount
-            state["coupon_push_count"] = 0
+            case_flow.set_pending_coupon(state, wants, coupon_amount)
             return {
                 "action": "info",
                 "amount": 0.0,
@@ -1081,7 +1100,7 @@ class Rules:
                 "reason": "Offer coupon before refund or replacement",
             }
 
-        state["pending"] = None
+        case_flow.clear_pending(state)
         return {
             "action": "info",
             "amount": 0.0,
@@ -1137,7 +1156,7 @@ class Rules:
         issue_type = state.get("issue_type", "quality")
         if issue_type == "delay" and desired == "replacement":
             desired = "coupon"
-            state["desired_resolution"] = "coupon"
+            case_flow.force_delay_resolution_to_coupon(state)
         push_count = int(state.get("coupon_push_count") or 0)
         preferred_resolution = Rules._preferred_refund_resolution(
             order_value=order_value,
@@ -1199,8 +1218,7 @@ class Rules:
             and not refund_requested
             and turn_act != "confirm"
         ):
-            state["pending"] = None
-            state["desired_resolution"] = None
+            case_flow.clear_resolution(state)
             return {
                 "action": "escalate",
                 "amount": 0.0,
@@ -1222,8 +1240,7 @@ class Rules:
                         economic_preference=state.get("economic_preference"),
                     )
                 ):
-                    state["pending"] = "replacement_confirm"
-                    state["desired_resolution"] = "replacement"
+                    case_flow.set_pending_replacement_confirmation(state)
                     return {
                         "action": "info",
                         "amount": 0.0,
@@ -1231,8 +1248,7 @@ class Rules:
                         "reason": "Repeated replacement request qualifies for low-risk remake confirmation",
                     }
                 if state["coupon_push_count"] >= Rules.MAX_COUPON_REINFORCEMENT_TURNS:
-                    state["pending"] = None
-                    state["desired_resolution"] = None
+                    case_flow.clear_resolution(state)
                     return {
                         "action": "escalate",
                         "amount": 0.0,
@@ -1278,8 +1294,7 @@ class Rules:
                     ),
                     "reason": "Reinforcing coupon before approving replacement",
                 }
-            state["pending"] = "replacement_confirm"
-            state["desired_resolution"] = "replacement"
+            case_flow.set_pending_replacement_confirmation(state)
             return {
                 "action": "info",
                 "amount": 0.0,
@@ -1289,8 +1304,7 @@ class Rules:
 
         if preferred_resolution == "replacement":
             state["coupon_push_count"] = push_count + 1
-            state["pending"] = "replacement_confirm"
-            state["desired_resolution"] = "replacement"
+            case_flow.set_pending_replacement_confirmation(state)
             return {
                 "action": "info",
                 "amount": 0.0,
@@ -1302,7 +1316,7 @@ class Rules:
             }
 
         if turn_act == "confirm" or (not assessment_provided and turn_act == "none" and Rules._accepted(user_text)):
-            state["pending"] = None
+            case_flow.clear_pending(state)
             return {
                 "action": "coupon",
                 "amount": float(state.get("coupon_amount", coupon_amount)),
@@ -1311,8 +1325,7 @@ class Rules:
             }
 
         if preferred_resolution == "escalate":
-            state["pending"] = None
-            state["desired_resolution"] = None
+            case_flow.clear_resolution(state)
             return {
                 "action": "escalate",
                 "amount": 0.0,
@@ -1346,16 +1359,14 @@ class Rules:
                 issue_severity=issue_severity,
                 evidence_strength=evidence_strength,
             ):
-                state["pending"] = None
-                state["desired_resolution"] = None
+                case_flow.clear_resolution(state)
                 return {
                     "action": "escalate",
                     "amount": 0.0,
                     "message": Rules._review_escalation_message("refund"),
                     "reason": "Refund requested but policy requires manual review",
                 }
-            state["pending"] = "refund_amount"
-            state["desired_resolution"] = "refund"
+            case_flow.set_pending_refund_amount(state)
             return {
                 "action": "info",
                 "amount": 0.0,
@@ -1389,8 +1400,7 @@ class Rules:
     ) -> Dict[str, Any]:
         item_name = state.get("active_item_name") or "item"
         if Rules._refund_hard_block(order_value, trust_score):
-            state["pending"] = "replacement_confirm"
-            state["desired_resolution"] = "replacement"
+            case_flow.set_pending_replacement_confirmation(state)
             return {
                 "action": "info",
                 "amount": 0.0,
@@ -1412,7 +1422,7 @@ class Rules:
             issue_severity=state.get("issue_severity", "medium"),
             evidence_strength=state.get("evidence_strength", "weak"),
         ):
-            state["pending"] = None
+            case_flow.clear_pending(state)
             return {
                 "action": "escalate",
                 "amount": 0.0,
@@ -1421,8 +1431,7 @@ class Rules:
             }
 
         amount = round(order_value * pct, 2)
-        state["pending"] = None
-        state["last_action"] = "refund"
+        case_flow.mark_refund_approved(state)
         return {
             "action": "refund",
             "amount": amount,
@@ -1459,8 +1468,7 @@ class Rules:
         refund_requested = wants == "refund" if assessment_provided else Rules._mentions_refund(user_text)
         replacement_reaffirmed = wants == "replacement" if assessment_provided else Rules._mentions_replacement(user_text)
         if any(phrase in user_text for phrase in ["review it", "move it for review", "escalate it", "raise this"]):
-            state["pending"] = None
-            state["desired_resolution"] = None
+            case_flow.clear_resolution(state)
             return {
                 "action": "escalate",
                 "amount": 0.0,
@@ -1476,8 +1484,7 @@ class Rules:
                     "reason": "Refund request steered back to replacement for economic reasons",
                 }
             if preferred_resolution == "escalate":
-                state["pending"] = None
-                state["desired_resolution"] = None
+                case_flow.clear_resolution(state)
                 return {
                     "action": "escalate",
                     "amount": 0.0,
@@ -1489,16 +1496,14 @@ class Rules:
                 issue_severity=issue_severity,
                 evidence_strength=evidence_strength,
             ):
-                state["pending"] = None
-                state["desired_resolution"] = None
+                case_flow.clear_resolution(state)
                 return {
                     "action": "escalate",
                     "amount": 0.0,
                     "message": Rules._review_escalation_message("refund"),
                     "reason": "Refund requested from replacement flow but policy requires review",
                 }
-            state["pending"] = "refund_amount"
-            state["desired_resolution"] = "refund"
+            case_flow.set_pending_refund_amount(state)
             return {
                 "action": "info",
                 "amount": 0.0,
@@ -1518,8 +1523,7 @@ class Rules:
 
         if not (turn_act == "confirm" or (not assessment_provided and turn_act == "none" and Rules._accepted(user_text))):
             if Rules._is_case_scope_or_support_pressure_turn(user_text):
-                state["pending"] = None
-                state["desired_resolution"] = None
+                case_flow.clear_resolution(state)
                 return {
                     "action": "escalate",
                     "amount": 0.0,
@@ -1535,7 +1539,7 @@ class Rules:
                 "reason": "Need clarification on replacement confirmation",
             }
 
-        state["pending"] = None
+        case_flow.clear_pending(state)
         if evidence_strength != "strong":
             if Rules._can_soft_approve_replacement(
                 issue_type=state.get("issue_type", "quality"),
@@ -1545,7 +1549,7 @@ class Rules:
                 evidence_strength=evidence_strength,
                 economic_preference=state.get("economic_preference"),
             ):
-                state["last_action"] = "replacement"
+                case_flow.mark_replacement_approved(state, item_name)
                 return {
                     "action": "replacement",
                     "amount": 0.0,
@@ -1559,8 +1563,7 @@ class Rules:
                 "reason": "Replacement requested but evidence is not strong enough for auto approval",
             }
 
-        state["last_action"] = "replacement"
-        state["last_item_name"] = item_name
+        case_flow.mark_replacement_approved(state, item_name)
         return {
             "action": "replacement",
             "amount": 0.0,
@@ -1586,7 +1589,11 @@ class Rules:
 
     @staticmethod
     def _refund_hard_block(order_value: float, trust_score: float) -> bool:
-        return order_value > Rules.HIGH_VALUE_THRESHOLD and trust_score <= Rules.REFUND_TRUST_THRESHOLD
+        return resolution_policy.refund_hard_block(
+            order_value=order_value,
+            trust_score=trust_score,
+            config=Rules.RESOLUTION_POLICY_CONFIG,
+        )
 
     @staticmethod
     def _refund_allowed(
@@ -1594,10 +1601,11 @@ class Rules:
         issue_severity: str,
         evidence_strength: str,
     ) -> bool:
-        return (
-            trust_score > Rules.REFUND_TRUST_THRESHOLD
-            and issue_severity == "high"
-            and evidence_strength == "strong"
+        return resolution_policy.refund_allowed(
+            trust_score=trust_score,
+            issue_severity=issue_severity,
+            evidence_strength=evidence_strength,
+            config=Rules.RESOLUTION_POLICY_CONFIG,
         )
 
     @staticmethod
@@ -1611,37 +1619,17 @@ class Rules:
         evidence_strength: str,
         economic_preference: Optional[str],
     ) -> str:
-        if desired_resolution != "refund":
-            return desired_resolution
-        if Rules._refund_hard_block(order_value, trust_score):
-            return "replacement"
-        if issue_type == "delay":
-            return "refund" if trust_score > Rules.REFUND_TRUST_THRESHOLD and evidence_strength == "strong" else "escalate"
-
-        if economic_preference in {"refund", "replacement", "escalate"}:
-            return economic_preference
-        if economic_preference == "escalate":
-            return "refund"
-
-        item_cost = float(item_price) if isinstance(item_price, (int, float)) else float(order_value)
-        replacement_cost = item_cost + Rules.ESTIMATED_REPLACEMENT_OVERHEAD
-        refund_cost = float(order_value)
-
-        if issue_type == "portion_size":
-            return "refund"
-        if issue_type in {"quality", "temperature"} and issue_severity != "high":
-            return "escalate"
-        if issue_type in {"wrong_item", "missing_item"} and evidence_strength == "strong":
-            return "refund" if refund_cost <= replacement_cost else "replacement"
-        if issue_type == "foreign_object" and issue_severity == "high":
-            return "refund"
-        if issue_type in {"spill_leak", "damaged"} and issue_severity == "high":
-            return "replacement"
-        if order_value <= Rules.LOW_VALUE_REFUND_THRESHOLD:
-            return "refund"
-        if refund_cost <= replacement_cost:
-            return "refund"
-        return "replacement"
+        return resolution_policy.preferred_refund_resolution(
+            order_value=order_value,
+            item_price=item_price,
+            trust_score=trust_score,
+            desired_resolution=desired_resolution,
+            issue_type=issue_type,
+            issue_severity=issue_severity,
+            evidence_strength=evidence_strength,
+            economic_preference=economic_preference,
+            config=Rules.RESOLUTION_POLICY_CONFIG,
+        )
 
     @staticmethod
     def _choose_economic_preference(
@@ -1655,7 +1643,7 @@ class Rules:
         assessed_preference: Optional[str],
         assessed_confidence: Optional[float],
     ) -> str:
-        default = Rules._default_economic_preference(
+        return resolution_policy.choose_economic_preference(
             desired_resolution=desired_resolution,
             issue_type=issue_type,
             issue_severity=issue_severity,
@@ -1663,15 +1651,10 @@ class Rules:
             order_value=order_value,
             item_price=item_price,
             trust_score=trust_score,
+            assessed_preference=assessed_preference,
+            assessed_confidence=assessed_confidence,
+            config=Rules.RESOLUTION_POLICY_CONFIG,
         )
-        if not assessed_preference:
-            return default
-        confidence = assessed_confidence or 0.0
-        if confidence < 0.6:
-            return default
-        if not Rules._economic_preference_allowed(assessed_preference, issue_type, evidence_strength, desired_resolution):
-            return default
-        return assessed_preference
 
     @staticmethod
     def _default_economic_preference(
@@ -1683,33 +1666,16 @@ class Rules:
         item_price: Optional[float],
         trust_score: float,
     ) -> str:
-        if desired_resolution not in {"refund", "replacement"}:
-            return "coupon"
-        if desired_resolution == "replacement" and evidence_strength != "strong":
-            return "coupon"
-        if desired_resolution == "refund" and Rules._refund_hard_block(order_value, trust_score):
-            return "replacement"
-        if issue_type == "delay":
-            return "coupon"
-        if issue_type == "portion_size":
-            return "refund"
-        if issue_type == "foreign_object" and issue_severity == "high":
-            return "refund"
-        if desired_resolution == "refund" and evidence_strength == "strong" and order_value > Rules.LOW_VALUE_REFUND_THRESHOLD:
-            item_cost = float(item_price) if isinstance(item_price, (int, float)) else float(order_value)
-            replacement_cost = item_cost + Rules.ESTIMATED_REPLACEMENT_OVERHEAD
-            return "replacement" if replacement_cost < float(order_value) else "refund"
-        if desired_resolution == "refund" and issue_severity != "high":
-            return "escalate"
-        if issue_type in {"wrong_item", "missing_item"} and evidence_strength == "strong":
-            return "replacement" if order_value > Rules.LOW_VALUE_REFUND_THRESHOLD else "refund"
-        if issue_type in {"spill_leak", "damaged"} and issue_severity == "high":
-            return "replacement"
-        item_cost = float(item_price) if isinstance(item_price, (int, float)) else float(order_value)
-        replacement_cost = item_cost + Rules.ESTIMATED_REPLACEMENT_OVERHEAD
-        if desired_resolution == "refund":
-            return "refund" if order_value <= replacement_cost else "replacement"
-        return "replacement" if evidence_strength == "strong" else "coupon"
+        return resolution_policy.default_economic_preference(
+            desired_resolution=desired_resolution,
+            issue_type=issue_type,
+            issue_severity=issue_severity,
+            evidence_strength=evidence_strength,
+            order_value=order_value,
+            item_price=item_price,
+            trust_score=trust_score,
+            config=Rules.RESOLUTION_POLICY_CONFIG,
+        )
 
     @staticmethod
     def _economic_preference_allowed(
@@ -1718,13 +1684,12 @@ class Rules:
         evidence_strength: str,
         desired_resolution: str,
     ) -> bool:
-        if economic_preference == "replacement" and evidence_strength != "strong":
-            return False
-        if issue_type in {"delay", "portion_size", "info_query"} and economic_preference == "replacement":
-            return False
-        if desired_resolution == "replacement" and economic_preference == "refund":
-            return False
-        return True
+        return resolution_policy.economic_preference_allowed(
+            economic_preference=economic_preference,
+            issue_type=issue_type,
+            evidence_strength=evidence_strength,
+            desired_resolution=desired_resolution,
+        )
 
     @staticmethod
     def _adjust_coupon_amount(
@@ -1734,17 +1699,21 @@ class Rules:
         desired_resolution: str,
         evidence_strength: str,
     ) -> float:
-        if desired_resolution == "replacement" and evidence_strength != "strong":
-            base = item_price if isinstance(item_price, (int, float)) and item_price > 0 else order_value
-            if base <= 0:
-                return 30.0
-            return float(max(20, min(100, round(base * 0.2))))
-        return coupon_amount
+        return resolution_policy.adjust_coupon_amount(
+            coupon_amount=coupon_amount,
+            order_value=order_value,
+            item_price=item_price,
+            desired_resolution=desired_resolution,
+            evidence_strength=evidence_strength,
+        )
 
     @staticmethod
     def _estimated_replacement_cost(order_value: float, item_price: Optional[float]) -> float:
-        item_cost = float(item_price) if isinstance(item_price, (int, float)) and item_price > 0 else float(order_value)
-        return item_cost + Rules.ESTIMATED_REPLACEMENT_OVERHEAD
+        return resolution_policy.estimated_replacement_cost(
+            order_value=order_value,
+            item_price=item_price,
+            config=Rules.RESOLUTION_POLICY_CONFIG,
+        )
 
     @staticmethod
     def _replacement_negotiation_turn_limit(
@@ -1755,16 +1724,15 @@ class Rules:
         evidence_strength: str,
         economic_preference: Optional[str],
     ) -> int:
-        if evidence_strength != "strong":
-            return Rules.MAX_COUPON_REINFORCEMENT_TURNS
-        if economic_preference == "escalate":
-            return 0
-        if issue_severity != "high":
-            return 0
-        replacement_cost = Rules._estimated_replacement_cost(order_value, item_price)
-        if replacement_cost - float(coupon_amount) < Rules.MIN_REPLACEMENT_NEGOTIATION_MARGIN:
-            return 0
-        return Rules.MAX_HIGH_SEVERITY_REPLACEMENT_NEGOTIATION_TURNS
+        return resolution_policy.replacement_negotiation_turn_limit(
+            order_value=order_value,
+            item_price=item_price,
+            coupon_amount=coupon_amount,
+            issue_severity=issue_severity,
+            evidence_strength=evidence_strength,
+            economic_preference=economic_preference,
+            config=Rules.RESOLUTION_POLICY_CONFIG,
+        )
 
     @staticmethod
     def _can_soft_approve_replacement(
@@ -1775,7 +1743,14 @@ class Rules:
         evidence_strength: str,
         economic_preference: Optional[str],
     ) -> bool:
-        return False
+        return resolution_policy.can_soft_approve_replacement(
+            issue_type=issue_type,
+            order_value=order_value,
+            item_price=item_price,
+            trust_score=trust_score,
+            evidence_strength=evidence_strength,
+            economic_preference=economic_preference,
+        )
 
     @staticmethod
     def _replacement_steer_message(item_name: str, hard_block_refund: bool) -> str:
@@ -1965,7 +1940,7 @@ class Rules:
             "delay": "delivery delay",
             "wrong_item": "wrong-item issue",
             "missing_item": "missing-item issue",
-            "damaged": "damage issue",
+            "damaged": "spill or damage issue",
             "spill_leak": "spill issue",
             "foreign_object": "safety issue",
             "portion_size": "quantity issue",
@@ -2457,56 +2432,16 @@ class Rules:
             return "missing_item"
         if any(word in text for word in ["hair", "plastic", "stone", "glass", "insect", "bug"]):
             return "foreign_object"
-        if Rules._solid_item_spill_is_damage(text):
-            return "damaged"
-        if any(word in text for word in ["spilled", "leaked", "leaking", "leked", "leking", "opened and spilled", "burst open"]):
-            return "spill_leak"
-        if any(word in text for word in ["damaged", "crushed", "broken", "soggy packaging"]):
-            return "damaged"
-        if re.search(r"\bnot\s+enough\s+(?:chicken|paneer|fries|rice|noodles|sauce|cheese|maggi|samosa)\b", text):
+        spill_or_damage = issue_signals.spill_or_damage_issue(text)
+        if spill_or_damage:
+            return spill_or_damage
+        if issue_signals.is_portion_signal(text):
             return "portion_size"
-        if re.search(r"\b(?:chicken|paneer|fries|rice|noodles|sauce|cheese|maggi|samosa)\s+(?:qty|qnty|quantity|portion)\s+(?:was\s+|is\s+)?(?:too\s+|very\s+)?(?:less|low|kam)\b", text):
-            return "portion_size"
-        if re.search(r"\b(qty|qnty|quantity|portion)\s+(?:too\s+|vry\s+|very\s+)?(less|low|kam)\b", text):
-            return "portion_size"
-        if re.search(r"\b(?:tiny|small)\s+(?:portion|serving|pieces?|pices)\b", text):
-            return "portion_size"
-        if re.search(r"\b(?:pieces?|pices)\s+(?:tha|the|were|was)?.{0,20}\b(?:tiny|small|less|kam)\b", text):
-            return "portion_size"
-        if any(
-            word in text
-            for word in [
-                "small portion",
-                "too little",
-                "less quantity",
-                "less in quantity",
-                "tiny portion",
-                "portion was small",
-                "quantity was less",
-                "very little",
-                "very less",
-                "very less food",
-                "less food",
-                "not enough food",
-                "not enough for what i paid",
-                "hardly any",
-                "small serving",
-                "under portion",
-                "underportioned",
-                "under-portioned",
-                "too less",
-            ]
-        ):
-            return "portion_size"
-        if re.search(r"\b(?:too|very)\s+less\b", text):
-            return "portion_size"
-        if re.search(r"\b(?:was|were|is)\s+less\b", text):
-            return "portion_size"
-        if any(word in text for word in ["sweet", "meetha", "salty", "bland", "burnt", "raw", "soggy", "terrible", "inedible", "bad taste"]):
+        if issue_signals.is_quality_signal(text):
             return "quality"
         if Rules._is_temperature_signal(text):
             return "temperature"
-        if any(word in text for word in ["late", "delay", "delayed", "where is my order"]) or re.search(r"\beta\b", text):
+        if issue_signals.is_delay_signal(text):
             return "delay"
         if item_name and item_name.lower() in text:
             return "quality"
@@ -2540,79 +2475,16 @@ class Rules:
             return "wrong_item"
         if Rules._looks_like_dietary_violation(text):
             return "foreign_object"
-        if Rules._solid_item_spill_is_damage(text):
-            return "damaged"
-        spill_context = any(
-            token in text
-            for token in (
-                "bag",
-                "cup",
-                "bottle",
-                "container",
-                "box",
-                "drink",
-                "shake",
-                "coffee",
-                "sharbat",
-                "curry",
-                "salad",
-                "bowl",
-                "pasta",
-                "sauce",
-                "gravy",
-                "leak",
-                "leaked",
-                "leaking",
-                "andar",
-            )
-        )
-        if re.search(r"\b(spill|spilled|spillage|leak|leaked|leaking|leked|leking|gir gaya|gir gya|gir gayi|gir gayi thi)\b", text):
-            return "spill_leak" if spill_context else "damaged"
-        if "bag me spill" in text or "bag mein spill" in text or "andar spill" in text:
-            return "spill_leak"
-        if re.search(r"\b(quantity|qty|qnty|portion)\s+(bahut\s+|too\s+|vry\s+|very\s+)?(kam|less|low)\b", text):
-            return "portion_size"
-        if re.search(r"\b(kam|less)\s+(quantity|qty|qnty|portion)\b", text):
-            return "portion_size"
-        if re.search(r"\bnot\s+enough\s+(?:chicken|paneer|fries|rice|noodles|sauce|cheese|maggi|samosa)\b", text):
-            return "portion_size"
-        if re.search(r"\b(?:chicken|paneer|fries|rice|noodles|sauce|cheese|maggi|samosa)\s+(?:qty|qnty|quantity|portion)\s+(?:was\s+|is\s+)?(?:too\s+|very\s+)?(?:less|low|kam)\b", text):
-            return "portion_size"
-        if any(phrase in text for phrase in ["bahut kam thi", "bahut kam tha", "quantity kam thi", "quantity kam tha", "size very small", "size bahut small", "pieces small", "pices small", "qty issue", "qnty issue"]):
+        spill_or_damage = issue_signals.spill_or_damage_issue(text, current_issue_type)
+        if spill_or_damage:
+            return spill_or_damage
+        if issue_signals.is_portion_signal(text):
             return "portion_size"
         return current_issue_type
 
     @staticmethod
     def _solid_item_spill_is_damage(text: str) -> bool:
-        if not text:
-            return False
-        if not re.search(r"\b(spill|spilled|spillage|leak|leaked|leaking|sauce bahar|sauce out)\b", text):
-            return False
-        solid_terms = [
-            "sandwich",
-            "burger",
-            "wrap",
-            "bread",
-            "fries",
-            "samosa",
-            "momos",
-            "roll",
-        ]
-        liquid_terms = [
-            "drink",
-            "shake",
-            "coffee",
-            "sharbat",
-            "curry",
-            "gravy",
-            "soup",
-            "beverage",
-            "cup",
-            "bottle",
-        ]
-        if any(term in text for term in liquid_terms):
-            return False
-        return any(term in text for term in solid_terms)
+        return issue_signals.is_solid_item_spill_damage(text)
 
     @staticmethod
     def _detect_requested_resolution(complaint: str, state: Dict[str, Any]) -> str:
@@ -3955,8 +3827,7 @@ class Rules:
 
     @staticmethod
     def _store_terminal_state(state: Dict[str, Any]) -> None:
-        state["pending"] = None
-        state["desired_resolution"] = None
+        case_flow.clear_resolution(state)
         state["coupon_push_count"] = 0
 
     @staticmethod
@@ -3965,11 +3836,7 @@ class Rules:
         if action not in {"refund", "replacement", "escalate"}:
             return
         Rules._store_terminal_state(state)
-        state["last_action"] = action
-        if action == "replacement":
-            state["last_item_name"] = item_name
-            state["approved_replacement_item_name"] = item_name
-            state["approved_replacement_status"] = "approved"
+        case_flow.mark_terminal_action(state, action, item_name)
         if action == "refund":
             state["last_amount"] = response.get("amount", 0.0)
 

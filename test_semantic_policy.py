@@ -40,6 +40,16 @@ def test_semantic_policy_detects_resolution_change_from_state():
     assert facts.resolution_change == "refund_after_replacement"
 
 
+def test_semantic_policy_detects_pending_replacement_status_question():
+    facts = normalize_semantic_facts(
+        text="in how much time will my replacement arrive?",
+        assessment={},
+        state={"pending": "replacement_confirm", "desired_resolution": "replacement"},
+    )
+
+    assert facts.replacement_status_query is True
+
+
 def test_semantic_policy_uses_llm_canonical_fields_when_text_is_short():
     facts = normalize_semantic_facts(
         text="this is not okay",
