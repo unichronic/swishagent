@@ -202,6 +202,9 @@ class Rules:
         if payment_or_billing_query:
             issue_type = "info_query"
             wants = "none"
+            assessed_selected_item_conflict = False
+            assessed_semantic_risk = False
+            assessed_semantic_risk_reason = None
             forced_info_query = forced_info_query if forced_info_query != "none" else state.get("last_info_query", "status")
         if Rules._is_non_delivery_signal(user_text):
             issue_type = "missing_item"
@@ -248,6 +251,10 @@ class Rules:
             info_query = forced_info_query
         if strong_new_issue_from_info:
             info_query = "none"
+        if issue_type == "info_query":
+            assessed_selected_item_conflict = False
+            assessed_semantic_risk = False
+            assessed_semantic_risk_reason = None
         assurance_query = bool(assessed_assurance_query) or (False if assessment_provided else Rules._detect_assurance_query(complaint))
         turn_act = Rules._choose_turn_act(
             assessed_turn_act=assessed_turn_act,
@@ -389,6 +396,11 @@ class Rules:
         state["dietary_severity"] = assessed_dietary_severity or "none"
         if info_query != "none":
             state["last_info_query"] = info_query
+        if issue_type == "delay" and wants == "replacement":
+            wants = "coupon"
+            state["desired_resolution"] = "coupon"
+            state["economic_preference"] = "coupon"
+            economic_preference = "coupon"
 
         if state.get("pending") == "photo" and current_turn_has_photo and photo_valid is not False:
             state["pending"] = None
@@ -574,6 +586,40 @@ class Rules:
 
         pending = state.get("pending")
         if pending and info_query != "none":
+            if Rules._is_active_case_status_followup(user_text, state):
+                response = {
+                    "action": "info",
+                    "amount": 0.0,
+                    "message": Rules._active_case_status_message(state, item_name),
+                    "reason": "User asked for active complaint status",
+                }
+                response = Rules._enforce_content(response, state)
+                response["_debug"] = {
+                    "issue_type": issue_type,
+                    "issue_type_source": "fallback",
+                    "issue_confidence": assessed_issue_confidence,
+                    "fault": fault,
+                    "fault_source": "llm" if fault == assessed_fault_hint and assessed_fault_hint else "fallback",
+                    "visual_evidence_useful": needs_visual,
+                    "requested_resolution": wants,
+                    "active_item_name": item.get("name") or state.get("active_item_name"),
+                    "issue_severity": issue_severity,
+                    "evidence_strength": evidence_strength,
+                    "economic_preference": economic_preference,
+                    "turn_act": turn_act,
+                    "info_query_confidence": assessed_info_query_confidence,
+                    "recommended_next_step": assessed_recommended_next_step or "fallback",
+                    "clarification_needed": clarification_needed,
+                    "tone_guardrail": tone_guardrail,
+                    "negotiation_allowed": negotiation_allowed,
+                    "negotiation_strength": negotiation_strength,
+                    "selected_item_conflict": assessed_selected_item_conflict,
+                    "mentioned_item_name": assessed_mentioned_item_name,
+                    "semantic_risk": assessed_semantic_risk,
+                    "semantic_confidence": semantic_confidence,
+                    "dietary_severity": assessed_dietary_severity or "none",
+                }
+                return response
             response = {
                 "action": "info",
                 "amount": 0.0,
@@ -812,6 +858,14 @@ class Rules:
             }
 
         if info_query != "none":
+            if Rules._is_active_case_status_followup(_lower(complaint), state):
+                state["pending"] = None
+                return {
+                    "action": "info",
+                    "amount": 0.0,
+                    "message": Rules._active_case_status_message(state, item_name),
+                    "reason": "User asked for active complaint status",
+                }
             state["pending"] = None
             return {
                 "action": "info",
@@ -962,6 +1016,9 @@ class Rules:
         issue_severity = state.get("issue_severity", "medium")
         evidence_strength = state.get("evidence_strength", "weak")
         issue_type = state.get("issue_type", "quality")
+        if issue_type == "delay" and desired == "replacement":
+            desired = "coupon"
+            state["desired_resolution"] = "coupon"
         push_count = int(state.get("coupon_push_count") or 0)
         preferred_resolution = Rules._preferred_refund_resolution(
             order_value=order_value,
@@ -980,9 +1037,18 @@ class Rules:
             desired = "refund"
 
         replacement_requested = wants == "replacement" if assessment_provided else Rules._mentions_replacement(user_text)
+        if issue_type == "delay":
+            replacement_requested = False
         refund_requested = wants == "refund" if assessment_provided else Rules._mentions_refund(user_text)
 
         if "whatever works" in user_text:
+            if issue_type == "delay":
+                return {
+                    "action": "info",
+                    "amount": 0.0,
+                    "message": "Just to be sure, do you want the coupon, a refund review, or only want this logged?",
+                    "reason": "Need clarification on ambiguous coupon response",
+                }
             return {
                 "action": "info",
                 "amount": 0.0,
@@ -1178,6 +1244,14 @@ class Rules:
                 "reason": "Coupon rejected, asking refund amount",
             }
 
+        if issue_type == "delay":
+            return {
+                "action": "info",
+                "amount": 0.0,
+                "message": "Just to be sure, do you want the coupon, a refund review, or only want this logged?",
+                "reason": "Need clarification on coupon decision",
+            }
+
         return {
             "action": "info",
             "amount": 0.0,
@@ -1331,7 +1405,7 @@ class Rules:
                     "action": "escalate",
                     "amount": 0.0,
                     "message": Rules._review_escalation_message("replacement"),
-                    "reason": "Replacement confirmation stalled under escalation pressure",
+                    "reason": "Unresolved case moved to review after escalation pressure",
                 }
             return {
                 "action": "info",
@@ -1422,6 +1496,8 @@ class Rules:
             return desired_resolution
         if Rules._refund_hard_block(order_value, trust_score):
             return "replacement"
+        if issue_type == "delay":
+            return "refund" if trust_score > Rules.REFUND_TRUST_THRESHOLD and evidence_strength == "strong" else "escalate"
 
         if economic_preference in {"refund", "replacement", "escalate"}:
             return economic_preference
@@ -1494,6 +1570,8 @@ class Rules:
             return "coupon"
         if desired_resolution == "refund" and Rules._refund_hard_block(order_value, trust_score):
             return "replacement"
+        if issue_type == "delay":
+            return "coupon"
         if issue_type == "portion_size":
             return "refund"
         if issue_type == "foreign_object" and issue_severity == "high":
@@ -1523,7 +1601,7 @@ class Rules:
     ) -> bool:
         if economic_preference == "replacement" and evidence_strength != "strong":
             return False
-        if issue_type == "portion_size" and economic_preference == "replacement":
+        if issue_type in {"delay", "portion_size", "info_query"} and economic_preference == "replacement":
             return False
         if desired_resolution == "replacement" and economic_preference == "refund":
             return False
@@ -1702,6 +1780,89 @@ class Rules:
         else:
             noted = f"a quality issue with the {item_name}"
         return f"I've noted this as {noted}. The ₹{amount} coupon is the direct option I can put through here."
+
+    @staticmethod
+    def _is_active_case_status_followup(text: str, state: Dict[str, Any]) -> bool:
+        if not text:
+            return False
+        if not state.get("case_issue_type") or state.get("case_issue_type") == "info_query":
+            return False
+        if Rules._has_strong_new_issue_signal(text, state.get("case_issue_type", "other")):
+            return False
+        case_status_phrases = [
+            "what happens now",
+            "what should i do",
+            "what should i do now",
+            "next step",
+            "final next step",
+            "what is the final",
+            "what have you noted",
+            "what you have noted",
+            "confirm what you have noted",
+            "what can you actually do",
+            "what can you do",
+            "any resolution",
+            "clear resolution",
+            "one clear next step",
+            "update in the app",
+            "show anywhere in the app",
+            "will this show",
+            "documented against my order",
+            "keep the order context",
+            "order context attached",
+            "don't close",
+            "dont close",
+            "closed without resolution",
+            "reopen",
+            "start again",
+            "not closed",
+            "noted properly",
+            "note properly",
+            "simple batao",
+            "simple words",
+            "be specific",
+        ]
+        if any(phrase in text for phrase in case_status_phrases):
+            return True
+        if Rules._is_case_scope_or_support_pressure_turn(text) and not (
+            Rules._mentions_refund(text) or Rules._mentions_replacement(text) or "coupon" in text
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def _active_case_status_message(state: Dict[str, Any], item_name: str) -> str:
+        issue_type = state.get("case_issue_type") or state.get("issue_type") or "quality"
+        target = item_name if item_name and item_name != "item" else state.get("active_item_name") or "this order"
+        if state.get("last_action") == "escalate":
+            return "This is already marked for review. I can add your latest note here, but I can't approve another automatic fix in chat."
+        if state.get("last_action") in {"refund", "replacement", "coupon", "credit"}:
+            return "The action on this case is already recorded. I can keep the order context attached if you need to follow up."
+        if state.get("pending") == "photo":
+            return f"I've noted the {Rules._issue_label(issue_type)} for {target}. I still need a photo or video before I can decide compensation in chat."
+        if state.get("pending") == "coupon":
+            amount = int(float(state.get("coupon_amount") or Rules.STANDARD_COUPON_AMOUNT))
+            return f"I've noted the {Rules._issue_label(issue_type)} for {target}. The direct option I can put through right now is the ₹{amount} coupon."
+        if state.get("pending") == "replacement_confirm":
+            return f"I've noted the {Rules._issue_label(issue_type)} for {target}. I need you to confirm whether you want me to proceed with the fresh item."
+        if state.get("pending") == "refund_amount":
+            return f"I've noted the {Rules._issue_label(issue_type)} for {target}. I need the refund level from you: 25%, 50%, 75%, or full."
+        return f"I've noted the {Rules._issue_label(issue_type)} for {target}. Tell me whether you want a coupon, refund, replacement, or just want this logged."
+
+    @staticmethod
+    def _issue_label(issue_type: str) -> str:
+        labels = {
+            "quality": "quality issue",
+            "temperature": "temperature issue",
+            "delay": "delivery delay",
+            "wrong_item": "wrong-item issue",
+            "missing_item": "missing-item issue",
+            "damaged": "damage issue",
+            "spill_leak": "spill issue",
+            "foreign_object": "safety issue",
+            "portion_size": "quantity issue",
+        }
+        return labels.get(issue_type, "order issue")
 
     @staticmethod
     def _review_escalation_message(resolution_type: str) -> str:
@@ -2174,6 +2335,8 @@ class Rules:
             return "missing_item"
         if any(word in text for word in ["hair", "plastic", "stone", "glass", "insect", "bug"]):
             return "foreign_object"
+        if Rules._solid_item_spill_is_damage(text):
+            return "damaged"
         if any(word in text for word in ["spilled", "leaked", "leaking", "leked", "leking", "opened and spilled", "burst open"]):
             return "spill_leak"
         if any(word in text for word in ["damaged", "crushed", "broken", "soggy packaging"]):
@@ -2255,6 +2418,8 @@ class Rules:
             return "wrong_item"
         if Rules._looks_like_dietary_violation(text):
             return "foreign_object"
+        if Rules._solid_item_spill_is_damage(text):
+            return "damaged"
         spill_context = any(
             token in text
             for token in (
@@ -2294,6 +2459,38 @@ class Rules:
         if any(phrase in text for phrase in ["bahut kam thi", "bahut kam tha", "quantity kam thi", "quantity kam tha", "size very small", "size bahut small", "pieces small", "pices small", "qty issue", "qnty issue"]):
             return "portion_size"
         return current_issue_type
+
+    @staticmethod
+    def _solid_item_spill_is_damage(text: str) -> bool:
+        if not text:
+            return False
+        if not re.search(r"\b(spill|spilled|spillage|leak|leaked|leaking|sauce bahar|sauce out)\b", text):
+            return False
+        solid_terms = [
+            "sandwich",
+            "burger",
+            "wrap",
+            "bread",
+            "fries",
+            "samosa",
+            "momos",
+            "roll",
+        ]
+        liquid_terms = [
+            "drink",
+            "shake",
+            "coffee",
+            "sharbat",
+            "curry",
+            "gravy",
+            "soup",
+            "beverage",
+            "cup",
+            "bottle",
+        ]
+        if any(term in text for term in liquid_terms):
+            return False
+        return any(term in text for term in solid_terms)
 
     @staticmethod
     def _detect_requested_resolution(complaint: str, state: Dict[str, Any]) -> str:
@@ -2511,6 +2708,10 @@ class Rules:
     def _has_strong_new_issue_signal(text: str, current_issue_type: str) -> bool:
         if not text:
             return False
+        if current_issue_type == "damaged" and (
+            Rules._solid_item_spill_is_damage(text) or Rules._looks_like_open_lid_or_packaging(text)
+        ):
+            return False
         if "actually" in text and Rules._has_concrete_issue_signal(text):
             detected = Rules._strong_text_issue_override(text, Rules._detect_issue_type(text))
             return detected not in {"info_query", "other", current_issue_type}
@@ -2563,6 +2764,9 @@ class Rules:
             "is there any resolution",
             "don't ask the same thing",
             "dont ask the same thing",
+            "dont ask agin",
+            "ask agin same",
+            "ask again same",
             "if nothing else is needed",
             "tell me clearly",
             "will this show anywhere",
@@ -2702,6 +2906,9 @@ class Rules:
             "plz solve",
             "plz dont clos",
             "dont clos",
+            "dont ask agin",
+            "ask agin same",
+            "ask again same",
             "wat u noted",
             "i need reslution",
             "reslution only",
@@ -2733,6 +2940,9 @@ class Rules:
             "supervisor",
             "don't ask the same thing",
             "dont ask the same thing",
+            "dont ask agin",
+            "ask agin same",
+            "ask again same",
             "please don't ask",
             "please dont ask",
             "if nothing else is needed",
@@ -2912,6 +3122,8 @@ class Rules:
             or re.search(r"\bopen(?:ed)?\s+lid\b", text)
             or re.search(r"\b(seal|cap|cover)\s+(?:w(?:a)?s\s+|is\s+)?open(?:ed)?\b", text)
             or re.search(r"\b(container|cup|bottle|box)\s+(?:w(?:a)?s\s+|is\s+)?open(?:ed)?\b", text)
+            or re.search(r"\bpackag(?:e|ing)\s+(?:w(?:a)?s\s+|is\s+)?open(?:ed)?\b", text)
+            or re.search(r"\bopen(?:ed)?\s+packag(?:e|ing)\b", text)
         )
 
     @staticmethod

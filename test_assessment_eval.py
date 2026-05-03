@@ -1,5 +1,6 @@
 import agent_service
 from fastapi.testclient import TestClient
+from rules import clear_session, get_session_state
 
 
 def _sample_context():
@@ -87,6 +88,51 @@ def test_assessment_eval_marks_provider_error(monkeypatch):
     assert assessment == {}
     assert meta["status"] == "error"
     assert "provider down" in meta["error"]
+
+
+def test_assessment_can_be_skipped_for_deterministic_pending_followup():
+    session_id = "test:assessment-skip-pending-followup"
+    clear_session(session_id)
+    state = get_session_state(session_id)
+    state["case_issue_type"] = "quality"
+    state["issue_type"] = "quality"
+    state["pending"] = "coupon"
+    state["conversation_mode"] = "active_complaint"
+
+    skip, reason = agent_service._can_skip_assessment("what happens now?", session_id, False)
+
+    assert skip is True
+    assert reason == "pending_followup"
+
+
+def test_assessment_not_skipped_when_followup_introduces_new_issue():
+    session_id = "test:assessment-no-skip-new-issue"
+    clear_session(session_id)
+    state = get_session_state(session_id)
+    state["case_issue_type"] = "quality"
+    state["issue_type"] = "quality"
+    state["pending"] = "coupon"
+    state["conversation_mode"] = "active_complaint"
+
+    skip, reason = agent_service._can_skip_assessment("actually Roohafza Sharbat leaked in the bag", session_id, False)
+
+    assert skip is False
+    assert reason == "new_issue_signal"
+
+
+def test_assessment_skipped_for_typo_followup_after_review():
+    session_id = "test:assessment-skip-typo-review-followup"
+    clear_session(session_id)
+    state = get_session_state(session_id)
+    state["case_issue_type"] = "portion_size"
+    state["issue_type"] = "portion_size"
+    state["last_action"] = "escalate"
+    state["conversation_mode"] = "review"
+
+    skip, reason = agent_service._can_skip_assessment("dont ask agin same thing", session_id, False)
+
+    assert skip is True
+    assert reason == "terminal_followup"
 
 
 def test_humanize_prompt_does_not_include_internal_action_or_amount(monkeypatch):

@@ -194,6 +194,37 @@ def _assess_case(
         return {}, {"status": "error", "error": str(exc)}
 
 
+def _can_skip_assessment(complaint: str, session_id: str, has_photo: bool) -> tuple[bool, str]:
+    if has_photo:
+        return False, "photo_turn"
+    state = get_session_state(session_id)
+    if not state:
+        return False, "new_session"
+    text = complaint.strip().lower()
+    if not text:
+        return False, "empty"
+    current_issue = state.get("case_issue_type") or state.get("issue_type") or "other"
+    if Rules._has_strong_new_issue_signal(text, current_issue):
+        return False, "new_issue_signal"
+
+    deterministic_pending = state.get("pending") in {"coupon", "refund_amount", "replacement_confirm", "photo"}
+    terminal_or_review = state.get("last_action") in {"escalate", "refund", "replacement", "coupon"} or state.get("case_resolved_by_user")
+    followup = (
+        Rules._is_followup_or_evidence_turn(text)
+        or Rules._is_case_scope_or_support_pressure_turn(text)
+        or Rules._is_generic_info_followup(text)
+        or Rules._is_resolution_only_turn(text)
+        or Rules._detect_requested_resolution(text, state) != "none"
+    )
+    if deterministic_pending and followup:
+        return True, "pending_followup"
+    if terminal_or_review and followup:
+        return True, "terminal_followup"
+    if state.get("conversation_mode") in {"active_complaint", "review", "resolved"} and followup:
+        return True, "active_case_followup"
+    return False, "needs_assessment"
+
+
 def _fetch_with_trace(request_id: str, name: str, fn, *args) -> dict:
     started = time.perf_counter()
     try:
@@ -548,15 +579,24 @@ def run(req: RunRequest, request: Request):
 
         order_value = req.order_value or float(order_details.get("total_amount") or 0.0)
         assessment_started = time.perf_counter()
-        assessment, assessment_meta = _assess_case(
-            complaint=req.complaint,
-            history=history,
-            order_details=order_details,
-            order_items=order_items,
-            kitchen=kitchen,
-            fleet=fleet,
-            trust=trust,
+        skip_assessment, assessment_skip_reason = _can_skip_assessment(
+            req.complaint,
+            session_id,
+            bool(req.photo_url),
         )
+        if skip_assessment:
+            assessment = {}
+            assessment_meta = {"status": "skipped", "reason": assessment_skip_reason}
+        else:
+            assessment, assessment_meta = _assess_case(
+                complaint=req.complaint,
+                history=history,
+                order_details=order_details,
+                order_items=order_items,
+                kitchen=kitchen,
+                fleet=fleet,
+                trust=trust,
+            )
         trace_event(
             logger,
             "assessment_completed",
@@ -567,7 +607,7 @@ def run(req: RunRequest, request: Request):
             issue_type=assessment.get("issue_type") if assessment else None,
             requested_resolution=assessment.get("requested_resolution") if assessment else None,
         )
-        assessment_fallback_used = assessment_meta.get("status") != "ok"
+        assessment_fallback_used = assessment_meta.get("status") not in {"ok", "skipped"}
         if assessment_fallback_used:
             logger.warning(
                 "assessment_failed order_id=%s user_id=%s status=%s raw_preview=%s error=%s",

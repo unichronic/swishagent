@@ -24,7 +24,7 @@ from pathlib import Path
 
 import requests
 
-from response_quality import evaluate_response_quality
+from response_quality import evaluate_response_quality, evaluate_response_with_llm_judge
 
 
 @dataclass(frozen=True)
@@ -1427,7 +1427,7 @@ def _clear_session(
     return {"status": "cleared"}
 
 
-def _validate_case(case: LiveCase, outputs: list[dict], status_payload: dict | None) -> dict:
+def _validate_case(case: LiveCase, outputs: list[dict], status_payload: dict | None, *, llm_judge: bool = False) -> dict:
     errors = []
     if not outputs:
         errors.append("no outputs")
@@ -1446,15 +1446,19 @@ def _validate_case(case: LiveCase, outputs: list[dict], status_payload: dict | N
             for prior in outputs[: max(0, int(output["turn"]) - 1)]
             if "error" not in prior
         ]
-        quality_errors = evaluate_response_quality(
-            response,
-            complaint=output.get("complaint", ""),
-            expected_issue_type=((response.get("case_state") or {}).get("final_issue_type") or case.expected_issue_type),
-            expected_item_name=((response.get("case_state") or {}).get("selected_item") or ""),
-            previous_messages=previous_messages,
-        )
+        quality_kwargs = {
+            "complaint": output.get("complaint", ""),
+            "expected_issue_type": ((response.get("case_state") or {}).get("final_issue_type") or case.expected_issue_type),
+            "expected_item_name": ((response.get("case_state") or {}).get("selected_item") or ""),
+            "previous_messages": previous_messages,
+        }
+        quality_errors = evaluate_response_quality(response, **quality_kwargs)
         if quality_errors:
             errors.append(f"turn {output['turn']} response quality errors: {quality_errors}")
+        if llm_judge:
+            judgement = evaluate_response_with_llm_judge(response, **quality_kwargs)
+            if not judgement.get("passed"):
+                errors.append(f"turn {output['turn']} llm judge errors: {judgement.get('errors')}")
     if case.strict_tone:
         errors.extend(_conversation_tone_errors(outputs))
     final_response = outputs[-1].get("response") or {}
@@ -1521,7 +1525,7 @@ def _validate_case(case: LiveCase, outputs: list[dict], status_payload: dict | N
     return {"passed": not errors, "errors": errors}
 
 
-def run_case(base_url: str, api_prefix: str, turn_delay_seconds: float, timeout_seconds: float, case: LiveCase) -> dict:
+def run_case(base_url: str, api_prefix: str, turn_delay_seconds: float, timeout_seconds: float, case: LiveCase, *, llm_judge: bool = False) -> dict:
     user_id = f"qa-{case.case_id}-{uuid.uuid4().hex[:8]}"
     conversation_id = f"qa-live:{case.case_id}:{uuid.uuid4().hex[:10]}"
     clear_status = _clear_session(base_url, user_id, case.order_id, conversation_id, timeout_seconds, api_prefix)
@@ -1572,7 +1576,7 @@ def run_case(base_url: str, api_prefix: str, turn_delay_seconds: float, timeout_
         )
     except Exception as exc:
         status_payload = {"status": "unavailable", "error": str(exc)}
-    validation = _validate_case(case, outputs, status_payload)
+    validation = _validate_case(case, outputs, status_payload, llm_judge=llm_judge)
     return {
         "case_id": case.case_id,
         "user_id": user_id,
@@ -1614,6 +1618,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--request-timeout-seconds", type=float, default=45.0)
     parser.add_argument("--output-jsonl", default="", help="Optional JSONL file path for per-case results.")
     parser.add_argument("--fail-on-error", action="store_true", help="Exit non-zero if any case validation fails.")
+    parser.add_argument("--llm-judge", action="store_true", help="Use configured LLM judge for semantic response scoring.")
     return parser.parse_args()
 
 
@@ -1629,7 +1634,14 @@ def main() -> int:
     output_path = Path(args.output_jsonl) if args.output_jsonl else None
     for case in cases:
         print(f"running {case.case_id} against {args.base_url}", file=sys.stderr)
-        result = run_case(args.base_url, args.api_prefix, args.turn_delay_seconds, args.request_timeout_seconds, case)
+        result = run_case(
+            args.base_url,
+            args.api_prefix,
+            args.turn_delay_seconds,
+            args.request_timeout_seconds,
+            case,
+            llm_judge=args.llm_judge,
+        )
         summary.append(result)
         status = "PASS" if result["validation"]["passed"] else "FAIL"
         final = (result["outputs"][-1].get("response") or {}) if result["outputs"] else {}

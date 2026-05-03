@@ -1,6 +1,8 @@
 import re
+import json
 from typing import Any, Optional
 
+from llm_client import call_gemini_judge
 from support_state import style_warnings
 
 
@@ -136,6 +138,20 @@ def _semantic_errors(
         errors.append("delay_reply_drifted_to_replacement")
     if issue_type == "info_query" and any(term in lowered for term in ("quality issue", "food issue", "refund approved")):
         errors.append("info_query_reply_drifted_to_complaint")
+    if issue_type and issue_type != "info_query" and reason.startswith("User asked for order information"):
+        complaint_lower = _lower(complaint)
+        active_case_followups = (
+            "what happens now",
+            "next step",
+            "what have you noted",
+            "what can you do",
+            "any resolution",
+            "clear resolution",
+            "documented against my order",
+            "keep the order context",
+        )
+        if any(phrase in complaint_lower for phrase in active_case_followups):
+            errors.append("active_complaint_followup_misrouted_to_order_info")
     if issue_type == "quality" and "wrong item was packed" in lowered:
         errors.append("quality_reply_drifted_to_wrong_item")
     if any(term in lowered for term in ("you're right", "you are right", "definitely")) and "can't verify" in lowered:
@@ -209,3 +225,163 @@ def evaluate_response_quality(
     )
     errors.extend(_conversation_errors(message, previous_messages))
     return errors
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    if not text:
+        return {}
+    start = text.find("{")
+    if start == -1:
+        return {}
+    depth = 0
+    end = -1
+    for index, char in enumerate(text[start:], start):
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                end = index + 1
+                break
+    if end == -1:
+        return {}
+    try:
+        parsed = json.loads(text[start:end])
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _judge_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = _lower(value)
+        if lowered in {"true", "yes"}:
+            return True
+        if lowered in {"false", "no"}:
+            return False
+    return None
+
+
+def _judge_score(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)):
+        score = float(value)
+    elif isinstance(value, str):
+        try:
+            score = float(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return score if 0 <= score <= 1 else None
+
+
+def _judge_errors(judgement: dict[str, Any], *, min_score: float) -> list[str]:
+    errors = []
+    bool_checks = {
+        "understood_customer": "judge_did_not_understand_customer",
+        "preserved_item": "judge_item_not_preserved",
+        "preserved_issue": "judge_issue_not_preserved",
+        "preserved_action": "judge_action_not_preserved",
+        "policy_safe": "judge_policy_unsafe",
+        "human_tone": "judge_tone_not_human",
+        "no_overpromise": "judge_overpromise",
+        "clarification_good": "judge_clarification_bad",
+    }
+    for key, error in bool_checks.items():
+        value = _judge_bool(judgement.get(key))
+        if value is False:
+            errors.append(error)
+    for key in ("semantic_score", "tone_score", "policy_score"):
+        score = _judge_score(judgement.get(key))
+        if score is not None and score < min_score:
+            errors.append(f"{key}_below_{min_score:g}:{score:g}")
+    return errors
+
+
+def evaluate_response_with_llm_judge(
+    response: dict[str, Any],
+    *,
+    complaint: str,
+    order_items: Optional[dict] = None,
+    expected_issue_type: str = "",
+    expected_item_name: str = "",
+    previous_messages: Optional[list[str]] = None,
+    min_score: float = 0.75,
+) -> dict[str, Any]:
+    deterministic_errors = evaluate_response_quality(
+        response,
+        complaint=complaint,
+        order_items=order_items,
+        expected_issue_type=expected_issue_type,
+        expected_item_name=expected_item_name,
+        previous_messages=previous_messages,
+    )
+    item_names = _order_item_names(order_items)
+    case_state = response.get("case_state") or {}
+    debug = response.get("_debug") or {}
+    expected_issue = expected_issue_type or debug.get("issue_type") or case_state.get("final_issue_type") or ""
+    expected_item = expected_item_name or debug.get("active_item_name") or case_state.get("selected_item") or ""
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a strict QA judge for a Swish food-support agent. "
+                "Judge only the assistant reply quality, not whether you personally prefer a different policy. "
+                "The deterministic policy controls payouts; your job is semantic and conversational quality. "
+                "Return JSON only. Do not include markdown. "
+                "Check whether the reply understood the customer, preserved item/issue/action/amount/evidence, avoided overpromising, sounded human, and asked clarification when needed. "
+                "A reply can be good even if it refuses refund/replacement, as long as it is grounded and policy-safe."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Customer message: {complaint}\n"
+                f"Previous bot messages: {previous_messages or []}\n"
+                f"Order items: {item_names}\n"
+                f"Expected item if known: {expected_item}\n"
+                f"Expected issue if known: {expected_issue}\n"
+                f"Agent action: {response.get('action')}\n"
+                f"Agent amount: {response.get('amount')}\n"
+                f"Agent reason: {response.get('reason')}\n"
+                f"Agent message: {response.get('message')}\n"
+                f"Deterministic quality errors already found: {deterministic_errors}\n"
+                'Return JSON with keys: passed, semantic_score, tone_score, policy_score, understood_customer, preserved_item, preserved_issue, preserved_action, policy_safe, human_tone, no_overpromise, clarification_good, errors, notes.'
+            ),
+        },
+    ]
+    try:
+        raw = call_gemini_judge(messages)
+        judgement = _extract_json_object(raw)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "errors": [f"judge_error:{type(exc).__name__}:{str(exc)[:160]}"],
+            "deterministic_errors": deterministic_errors,
+            "raw": "",
+        }
+    if not judgement:
+        return {
+            "status": "invalid_json",
+            "errors": ["judge_invalid_json"],
+            "deterministic_errors": deterministic_errors,
+            "raw": raw[:500],
+        }
+    judge_errors = _judge_errors(judgement, min_score=min_score)
+    explicit_errors = judgement.get("errors")
+    if isinstance(explicit_errors, list):
+        judge_errors.extend(f"judge:{str(item)}" for item in explicit_errors if str(item).strip())
+    passed = _judge_bool(judgement.get("passed"))
+    if passed is False:
+        judge_errors.append("judge_failed_response")
+    all_errors = deterministic_errors + judge_errors
+    return {
+        "status": "ok",
+        "passed": not all_errors,
+        "errors": all_errors,
+        "deterministic_errors": deterministic_errors,
+        "judge_errors": judge_errors,
+        "judgement": judgement,
+    }

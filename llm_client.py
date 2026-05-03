@@ -88,6 +88,16 @@ def call_text(messages: list, **kwargs) -> str:
     return _call_gemini_text(messages, trace_name=trace_name, trace_metadata=trace_metadata, **kwargs)
 
 
+def call_gemini_judge(messages: list) -> str:
+    """Eval-only judge path: use Gemini directly instead of provider cascade."""
+    return _call_gemini_text(
+        messages,
+        temperature=0,
+        trace_name="llm.eval_judge.gemini",
+        trace_metadata={"component": "eval_judge", "provider": "gemini"},
+    )
+
+
 def call_text_judge(messages: list) -> str:
     """
     LLM-as-Judge: Explicitly use Mistral for semantic detection.
