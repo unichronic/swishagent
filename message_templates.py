@@ -16,8 +16,8 @@ def _lower(text: Optional[str]) -> str:
 
 def replacement_steer_message(item_name: str, hard_block_refund: bool) -> str:
     if hard_block_refund:
-        return f"I can't lock in a cash refund on this one, but I can still make this right with a fresh {item_name} if that works for you."
-    return f"If the coupon doesn't feel enough, the cleaner fix I can do here is a fresh {item_name}."
+        return f"I can't lock in a cash refund directly in chat here. What I can still offer is a fresh {item_name}, or I can send the refund request for review."
+    return f"A fresh {item_name} is the fix I can approve directly here. If you still want a cash refund instead, I need to send that for review."
 
 
 def replacement_confirm_message(item_name: str) -> str:
@@ -28,7 +28,7 @@ def issue_negotiation_frame(issue_type: str, desired_resolution: str, evidence_s
     if issue_type == "delay":
         return "the delay was longer than it should've been"
     if issue_type == "portion_size":
-        return "the quantity looked short for what you paid"
+        return "the quantity concern is hard to verify after delivery"
     if issue_type == "temperature":
         return "it should've reached you in better shape"
     if issue_type == "foreign_object":
@@ -85,12 +85,12 @@ def coupon_reinforcement_message(
         if push_count <= 1:
             if tone_guardrail == "sensitive" or negotiation_strength == "light":
                 return (
-                    f"I get why you'd rather have cash back here. The fastest thing I can put through right now is the ₹{amount} coupon. "
-                    f"If that doesn't work for you, I'll take it to the next step."
+                    f"I hear you. I can't approve cash back directly from this chat yet, but I can add a ₹{amount} coupon now. "
+                    f"If that doesn't work for you, I'll move it for review."
                 )
             return (
-                f"I get that you'd rather have cash back here because {frame}. The fastest fix I can put through right now "
-                f"is the ₹{amount} coupon."
+                f"I can't approve a cash refund directly from what I have here. "
+                f"The direct option I can apply now is a ₹{amount} coupon."
             )
         return (
             f"I can still add the ₹{amount} coupon right now. If that doesn't work for you, "
@@ -112,7 +112,7 @@ def coupon_context_message(
     if issue_type == "delay":
         noted = "a delivery delay"
     elif issue_type == "portion_size" and portion_component:
-        noted = f"low {portion_component} quantity on the {item_name}"
+        noted = f"a {portion_component} quantity concern on the {item_name}"
     elif issue_type == "portion_size":
         noted = f"a quantity issue on the {item_name}"
     elif issue_type in {"spill_leak", "damaged"}:
@@ -123,7 +123,7 @@ def coupon_context_message(
         noted = f"a wrong item issue for the {item_name}"
     else:
         noted = f"a quality issue with the {item_name}"
-    return f"I've noted this as {noted}. The ₹{amount} coupon is the direct option I can put through here."
+    return f"I've noted this as {noted}. The direct option I can apply in chat is the ₹{amount} coupon."
 
 
 def issue_label(issue_type: str) -> str:
@@ -156,7 +156,7 @@ def active_case_status_message(
         return f"I've noted the {issue_label(issue_type)} for {target}. I still need a photo or video before I can decide compensation in chat."
     if state.get("pending") == "coupon":
         amount = int(float(state.get("coupon_amount") or standard_coupon_amount))
-        return f"I've noted the {issue_label(issue_type)} for {target}. The direct option I can put through right now is the ₹{amount} coupon."
+        return f"I've noted the {issue_label(issue_type)} for {target}. The direct option I can apply in chat is the ₹{amount} coupon."
     if state.get("pending") == "replacement_confirm":
         return f"I've noted the {issue_label(issue_type)} for {target}. I need you to confirm whether you want me to proceed with the fresh item."
     if state.get("pending") == "refund_amount":
@@ -199,9 +199,9 @@ def semantic_confirmation_message(
     prep_anomaly: bool,
 ) -> str:
     if prep_anomaly or (issue_type == "quality" and fault == "kitchen"):
-        return f"Got it. I’m treating this as a prep-side quality issue for the {item_name}, not the selected issue category. Tell me if you want this only logged or want me to check what resolution is possible."
+        return f"Got it. I’ll handle this as a prep-side quality issue for {item_name}. Tell me if you only want this logged or want me to check the available fix."
     label = issue_label(issue_type)
-    return f"Got it. I’ll handle this as a {label} for the {item_name}. Tell me if you want this only logged or want me to check what resolution is possible."
+    return f"Got it. I’ll handle this as a {label} for {item_name}. Tell me if you only want this logged or want me to check the available fix."
 
 
 def photo_message(order_value: float, issue_type: str, item_name: str = "item") -> str:

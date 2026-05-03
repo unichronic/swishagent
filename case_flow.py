@@ -95,6 +95,7 @@ def confirm_semantic_clarification(
     state["conversation_mode"] = MODE_ACTIVE_COMPLAINT
     state["active_item_name"] = item_name
     state["prep_anomaly"] = prep_anomaly
+    state["semantic_clarified"] = True
 
 
 def set_conversation_mode_for_issue(state: MutableMapping[str, Any], issue_type: str, prior_case_issue_type: Optional[str]) -> None:

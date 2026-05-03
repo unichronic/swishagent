@@ -34,6 +34,8 @@ def is_portion_signal(text: str) -> bool:
         return True
     if re.search(r"\b(?:pieces?|pices)\s+(?:tha|the|were|was)?.{0,20}\b(?:tiny|small|less|kam)\b", text):
         return True
+    if re.search(r"\bonly\s+\d+\s+(?:pieces?|pices)\b", text):
+        return True
     if re.search(r"\b(?:too|very)\s+less\b", text):
         return True
     if re.search(r"\b(?:was|were|is)\s+less\b", text):

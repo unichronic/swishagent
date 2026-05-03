@@ -198,6 +198,7 @@ class Rules:
         prior_case_issue_severity = state.get("case_issue_severity")
         prior_case_evidence_strength = state.get("case_evidence_strength")
         prior_case_economic_preference = state.get("case_economic_preference")
+        prior_active_item_name = state.get("active_item_name")
 
         if matched_item.get("name"):
             state["active_item_name"] = matched_item.get("name")
@@ -439,6 +440,8 @@ class Rules:
             desired_resolution=wants,
             evidence_strength=evidence_strength,
         )
+        if issue_type == "quality" and issue_severity != "high" and evidence_strength != "strong":
+            coupon_amount = min(coupon_amount, float(Rules.STANDARD_COUPON_AMOUNT))
 
         state["issue_type"] = issue_type
         state["issue_severity"] = issue_severity
@@ -507,7 +510,11 @@ class Rules:
             Rules._store_terminal_state(state)
             return Rules._enforce_content(response, state)
 
-        if Rules._semantic_clarification_needed(
+        semantic_clarification_already_handled = bool(state.get("semantic_clarified")) and not Rules._has_strong_new_issue_signal(
+            user_text,
+            state.get("case_issue_type", "other"),
+        )
+        if not semantic_clarification_already_handled and Rules._semantic_clarification_needed(
             assessment_provided=assessment_provided,
             selected_item_conflict=assessed_selected_item_conflict,
             semantic_risk=assessed_semantic_risk,
@@ -586,6 +593,15 @@ class Rules:
                 "amount": 0.0,
                 "message": Rules._replacement_status_message(state),
                 "reason": "User asked for approved replacement status",
+            }
+            return Rules._enforce_content(response, state)
+
+        if Rules._is_agent_identity_question(user_text):
+            response = {
+                "action": "info",
+                "amount": 0.0,
+                "message": "I'm the support chat for this order. I can keep helping here, but if you want a manual review I can move it there instead.",
+                "reason": "User asked whether support is human or AI",
             }
             return Rules._enforce_content(response, state)
 
@@ -710,7 +726,18 @@ class Rules:
             photo_present=photo_present,
             visual_evidence_useful=needs_visual,
         )
-        if photo_required:
+        photo_blocked_by_active_pending = bool(pending) and not Rules._has_strong_new_issue_signal(
+            user_text,
+            state.get("case_issue_type", issue_type),
+        )
+        if (
+            photo_blocked_by_active_pending
+            and prior_active_item_name
+            and item_name
+            and _lower(prior_active_item_name) != _lower(item_name)
+        ):
+            photo_blocked_by_active_pending = False
+        if photo_required and not photo_blocked_by_active_pending:
             case_flow.set_pending_photo(state, wants)
             response = {
                 "action": "live_capture",
@@ -866,6 +893,7 @@ class Rules:
             "issue_severity": issue_severity,
             "evidence_strength": evidence_strength,
             "economic_preference": economic_preference,
+            "coupon_amount": coupon_amount,
             "turn_act": turn_act,
             "turn_act_confidence": assessed_turn_act_confidence,
             "info_query_confidence": assessed_info_query_confidence,
@@ -936,6 +964,14 @@ class Rules:
                 "amount": 0.0,
                 "message": Rules._replacement_status_message(state),
                 "reason": "User asked for approved replacement status",
+            }
+
+        if Rules._is_agent_identity_question(_lower(complaint)):
+            return {
+                "action": "info",
+                "amount": 0.0,
+                "message": "I'm the support chat for this order. I can keep helping here, but if you want a manual review I can move it there instead.",
+                "reason": "User asked whether support is human or AI",
             }
 
         if state.get("last_action") == "escalate" and info_query == "none":
@@ -1469,6 +1505,13 @@ class Rules:
 
         refund_requested = wants == "refund" if assessment_provided else Rules._mentions_refund(user_text)
         replacement_reaffirmed = wants == "replacement" if assessment_provided else Rules._mentions_replacement(user_text)
+        if Rules._is_agent_identity_question(user_text):
+            return {
+                "action": "info",
+                "amount": 0.0,
+                "message": "I'm the support chat for this order. I can keep helping here, but if you want a manual review I can move it there instead.",
+                "reason": "User asked whether support is human or AI",
+            }
         if any(phrase in user_text for phrase in ["review it", "move it for review", "escalate it", "raise this"]):
             case_flow.clear_resolution(state)
             return {
@@ -1478,7 +1521,24 @@ class Rules:
                 "reason": "User asked to move replacement case for review",
             }
         if (turn_act == "switch_resolution" and refund_requested) or (refund_requested and not hard_block_refund):
+            if "supervisor" in user_text or "human" in user_text:
+                case_flow.clear_resolution(state)
+                return {
+                    "action": "escalate",
+                    "amount": 0.0,
+                    "message": Rules._review_escalation_message("refund"),
+                    "reason": "Refund request moved to review after supervisor request",
+                }
             if preferred_resolution == "replacement":
+                state["replacement_refund_push_count"] = int(state.get("replacement_refund_push_count") or 0) + 1
+                if state["replacement_refund_push_count"] > 1:
+                    case_flow.clear_resolution(state)
+                    return {
+                        "action": "escalate",
+                        "amount": 0.0,
+                        "message": Rules._review_escalation_message("refund"),
+                        "reason": "Refund requested after replacement steering but requires review",
+                    }
                 return {
                     "action": "info",
                     "amount": 0.0,
@@ -2306,6 +2366,8 @@ class Rules:
             return "info_query"
         if Rules._looks_like_ingredient_mismatch(text):
             return "quality"
+        if Rules._is_absurd_or_vague_quality_text(text):
+            return "quality"
         if Rules._looks_like_dietary_violation(text):
             return "foreign_object"
         if Rules._is_wrong_order_signal(text):
@@ -2342,6 +2404,8 @@ class Rules:
         if Rules._is_non_delivery_signal(text):
             return "missing_item"
         if Rules._looks_like_ingredient_mismatch(text):
+            return "quality"
+        if Rules._is_absurd_or_vague_quality_text(text):
             return "quality"
         if Rules._is_wrong_order_signal(text):
             return "wrong_item"
@@ -2643,6 +2707,8 @@ class Rules:
     def _is_plain_info_query(text: str, detected_info_query: str, state: Dict[str, Any]) -> bool:
         if not text:
             return False
+        if state.get("case_issue_type") and Rules._is_active_case_status_followup(text, state):
+            return False
         if Rules._mentions_refund(text) or Rules._mentions_replacement(text) or "coupon" in text or "credit" in text:
             return False
         if Rules._is_non_delivery_signal(text) or Rules._is_wrong_order_signal(text):
@@ -2667,6 +2733,8 @@ class Rules:
             "can you be specific",
             "be specific",
             "what have you noted",
+            "what about my issue",
+            "what about the issue",
             "what have you noted for this order",
             "what you have noted",
             "confirm what you have noted",
@@ -2772,6 +2840,8 @@ class Rules:
             "wasting my time",
             "what you have noted",
             "what you can actually do",
+            "what about my issue",
+            "what about the issue",
             "not asking for sympathy",
             "proper resolution",
             "final answer",
@@ -2840,6 +2910,8 @@ class Rules:
             "update",
             "app",
             "what happens now",
+            "what about my issue",
+            "what about the issue",
             "next step",
             "confirm",
             "noted",
@@ -3033,6 +3105,21 @@ class Rules:
         if any(term in text for term in payment_terms):
             return True
         return any(term in text for term in order_failure_terms)
+
+    @staticmethod
+    def _is_agent_identity_question(text: str) -> bool:
+        if not text:
+            return False
+        return bool(
+            re.search(r"\b(are|r)\s+(you|u)\s+(human|ai|bot|robot)\b", text)
+            or re.search(r"\b(human|ai|bot|robot)\s+(agent|support)\b", text)
+        )
+
+    @staticmethod
+    def _is_absurd_or_vague_quality_text(text: str) -> bool:
+        if not text:
+            return False
+        return any(phrase in text for phrase in ["dead food", "food was dead", "food is dead", "gone bad", "inedible"])
 
     @staticmethod
     def _is_app_availability_query(text: str) -> bool:
@@ -3479,8 +3566,8 @@ class Rules:
         if issue_type == "portion_size":
             component = (state or {}).get("portion_component")
             if component:
-                return f"{prefix}I can't verify the {component} quantity or portion size from logs after delivery, but I'm logging this against the kitchen for the {item_name}."
-            return f"{prefix}I can't verify portion size from logs after delivery, but I'm logging this against the kitchen for the {item_name}."
+                return f"{prefix}I can't verify portion size or the {component} quantity from logs after delivery, but I'm logging this against the kitchen as a {component} quantity concern for the {item_name}."
+            return f"{prefix}I can't verify portion size from logs after delivery, but I'm logging this against the kitchen as a quantity concern for the {item_name}."
 
         if fault == "kitchen":
             if (state or {}).get("prep_anomaly"):
@@ -3538,8 +3625,8 @@ class Rules:
         if issue_type == "portion_size":
             component = (state or {}).get("portion_component")
             if component:
-                return f"I still can't verify the {component} quantity or portion size after delivery, but I've noted it against the kitchen for the {item_name}."
-            return f"I still can't verify portion size after delivery, but I've noted it against the kitchen for the {item_name}."
+                return f"I still can't verify portion size or the {component} quantity after delivery, but I'm keeping it logged as a {component} quantity concern for the {item_name}."
+            return f"I still can't verify portion size after delivery, but I'm keeping it logged as a quantity concern for the {item_name}."
 
         if fault == "kitchen":
             return f"I've noted this as a prep-side quality issue for the {item_name}."
@@ -3696,8 +3783,8 @@ class Rules:
             return f"I can offer a ₹{amount} coupon for the delay right away if that works for you."
         if issue_type == "portion_size":
             if portion_component:
-                return f"I can add a ₹{amount} coupon right away for the low {portion_component} quantity. Want me to put that through?"
-            return f"I can add a ₹{amount} coupon right away for the quantity issue. Want me to put that through?"
+                return f"For the {portion_component} quantity concern, I can apply a ₹{amount} coupon in chat. Want me to do that?"
+            return f"For the quantity concern, I can apply a ₹{amount} coupon in chat. Want me to do that?"
         if issue_type == "foreign_object":
             if tone_guardrail == "sensitive":
                 return f"I can put through a ₹{amount} coupon right away while I keep this moving for you. If that still doesn't feel right, we can take the next step."

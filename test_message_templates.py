@@ -26,7 +26,7 @@ def test_semantic_confirmation_handles_prep_anomaly_without_wrong_category():
     )
 
     assert "prep-side quality issue" in message
-    assert "not the selected issue category" in message
+    assert "selected issue category" not in message
 
 
 def test_active_case_status_for_cancelled_replacement_refund_review():

@@ -505,8 +505,9 @@ function App() {
       } else {
         setCaptureError("We couldn't verify that capture. Retake it with the order clearly in frame.")
       }
-    } catch {
-      setCaptureError('Something went wrong while checking the capture. Please try again.')
+    } catch (error) {
+      const message = error?.response?.data?.message || error?.response?.data?.error || 'Something went wrong while checking the capture. Please try again.'
+      setCaptureError(message)
     } finally {
       setVerifyingCapture(false)
     }
@@ -547,8 +548,9 @@ function App() {
         timestamp: new Date()
       }])
       if (response.data.action === 'live_capture') setAwaitingPhoto(true)
-    } catch {
-      setMessages(prev => [...prev, { type: 'bot', text: 'Sorry, something went wrong. Please try again.', timestamp: new Date() }])
+    } catch (error) {
+      const text = error?.response?.data?.message || error?.response?.data?.error || 'Sorry, something went wrong. Please try again.'
+      setMessages(prev => [...prev, { type: 'bot', text, timestamp: new Date() }])
     } finally {
       setLoading(false)
     }
@@ -604,9 +606,10 @@ function App() {
         setAwaitingPhoto(true)
       }
     } catch (error) {
+      const text = error?.response?.data?.message || error?.response?.data?.error || 'Sorry, something went wrong. Please try again.'
       const errorMessage = {
         type: 'bot',
-        text: 'Sorry, something went wrong. Please try again.',
+        text,
         timestamp: new Date()
       }
       setMessages(prev => [...prev, errorMessage])
