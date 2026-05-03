@@ -1,4 +1,5 @@
 import agent_service
+from fastapi.testclient import TestClient
 
 
 def _sample_context():
@@ -124,3 +125,58 @@ def test_humanizer_rejects_invented_product_policy_claims(monkeypatch):
     )
 
     assert result["message"] == "I can't verify portion size reliably after delivery, but I've logged it against the kitchen."
+
+
+def test_humanizer_rejects_invented_compensation_claims(monkeypatch):
+    monkeypatch.setattr(
+        agent_service,
+        "_call_text_with_trace",
+        lambda messages, **kwargs: '{"message":"I’ll add 20% back to your wallet for the wait."}',
+    )
+    original = "I can see why that was frustrating. The delay happened after the kitchen finished it."
+    result = agent_service._humanize_message(
+        {
+            "action": "info",
+            "amount": 0,
+            "message": original,
+            "reason": "No explicit compensation request",
+        },
+        complaint="this is outrageous",
+        order_items={"items": [{"name": "Dhaba Style Chicken Curry Rice Bowl", "price": 269}]},
+        history=[{"role": "user", "content": "this is outrageous"}],
+    )
+
+    assert result["message"] == original
+
+
+def test_run_falls_back_to_rules_when_assessment_provider_fails(monkeypatch):
+    client = TestClient(agent_service.app)
+
+    monkeypatch.setattr(agent_service, "get_order_details", lambda order_id: {"order_id": order_id, "total_amount": 222})
+    monkeypatch.setattr(
+        agent_service,
+        "get_order_items",
+        lambda order_id: {"items": [{"name": "Classic Maggi", "price": 79}]},
+    )
+    monkeypatch.setattr(agent_service, "check_kitchen_log", lambda order_id: {"quality_out": "good", "temperature_check": "cold"})
+    monkeypatch.setattr(agent_service, "check_fleet_status", lambda order_id: {"delay_mins": 0, "traffic_flag": False})
+    monkeypatch.setattr(agent_service, "get_trust_score", lambda user_id: {"score": 88, "total_orders": 12})
+    monkeypatch.setattr(agent_service, "get_delivery_info", lambda order_id: {"status": "delivered"})
+    monkeypatch.setattr(agent_service, "_assess_case", lambda **kwargs: ({}, {"status": "error", "error": "provider down"}))
+    monkeypatch.setattr(agent_service, "_humanize_message", lambda resolution, complaint, order_items, history: resolution)
+
+    response = client.post(
+        "/run",
+        json={
+            "user_id": "USER123",
+            "order_id": "ORD001",
+            "conversation_id": "test:assessment-fallback",
+            "complaint": "my food was cold",
+            "order_value": 222,
+        },
+    )
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["action"] == "info"
+    assert payload["reason"] != "assessment_unavailable:error"

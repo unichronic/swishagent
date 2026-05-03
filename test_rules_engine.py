@@ -469,6 +469,8 @@ def test_llm_overcall_to_foreign_object_is_downgraded_for_benign_ingredient_mism
     )
 
     assert result["_debug"]["issue_type"] == "quality"
+    assert result["_debug"]["fault"] == "kitchen"
+    assert result["_debug"]["visual_evidence_useful"] is False
 
 
 def test_strong_replacement_evidence_skips_coupon_loop_and_moves_to_confirmation():
@@ -724,6 +726,110 @@ def test_replacement_approval_does_not_reopen_confirmation_loop():
     assert last["action"] == "replacement"
     assert after["action"] == "info"
     assert after["reason"] == "Replacement already approved"
+
+
+def test_emotional_followup_does_not_reclassify_established_case():
+    session_id = "test:emotional-followup-inherits-case"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    order_items = {"items": [{"name": "Dhaba Style Chicken Curry Rice Bowl", "price": 269}]}
+
+    first = Rules.resolve(
+        complaint="there was a piece of vegetable in my chicken bowl",
+        conversation_history=[{"role": "user", "content": "there was a piece of vegetable in my chicken bowl"}],
+        order_value=756,
+        trust_score=85,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 85, "total_orders": 20},
+        order_details={"total_amount": 756},
+        order_items=order_items,
+        session_id=session_id,
+        assessment={
+            "issue_type": "foreign_object",
+            "issue_confidence": 0.95,
+            "active_item_name": "Dhaba Style Chicken Curry Rice Bowl",
+            "issue_severity": "high",
+        },
+    )
+    history.append({"role": "user", "content": "there was a piece of vegetable in my chicken bowl"})
+    history.append({"role": "bot", "content": first["message"]})
+
+    history.append({"role": "user", "content": "this is outrageous"})
+    second = Rules.resolve(
+        complaint="this is outrageous",
+        conversation_history=history,
+        order_value=756,
+        trust_score=85,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 85, "total_orders": 20},
+        order_details={"total_amount": 756},
+        order_items=order_items,
+        session_id=session_id,
+        assessment={
+            "issue_type": "foreign_object",
+            "issue_confidence": 0.98,
+            "issue_severity": "high",
+            "recommended_next_step": "escalate",
+        },
+    )
+
+    assert first["_debug"]["issue_type"] == "quality"
+    assert second["_debug"]["issue_type"] == "quality"
+    assert second["action"] == "info"
+
+
+def test_concrete_followup_can_change_issue_type_when_user_adds_new_detail():
+    session_id = "test:concrete-followup-does-not-force-old-case"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    order_items = {"items": [{"name": "Dhaba Style Chicken Curry Rice Bowl", "price": 269}]}
+
+    first = Rules.resolve(
+        complaint="there was a piece of vegetable in my chicken bowl",
+        conversation_history=[{"role": "user", "content": "there was a piece of vegetable in my chicken bowl"}],
+        order_value=756,
+        trust_score=85,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "cold"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 85, "total_orders": 20},
+        order_details={"total_amount": 756},
+        order_items=order_items,
+        session_id=session_id,
+        assessment={
+            "issue_type": "foreign_object",
+            "issue_confidence": 0.95,
+            "active_item_name": "Dhaba Style Chicken Curry Rice Bowl",
+            "issue_severity": "high",
+        },
+    )
+    history.append({"role": "user", "content": "there was a piece of vegetable in my chicken bowl"})
+    history.append({"role": "bot", "content": first["message"]})
+
+    history.append({"role": "user", "content": "it was cold too"})
+    second = Rules.resolve(
+        complaint="it was cold too",
+        conversation_history=history,
+        order_value=756,
+        trust_score=85,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "cold"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 85, "total_orders": 20},
+        order_details={"total_amount": 756},
+        order_items=order_items,
+        session_id=session_id,
+        assessment={
+            "issue_type": "temperature",
+            "issue_confidence": 0.95,
+            "issue_severity": "medium",
+        },
+    )
+
+    assert first["_debug"]["issue_type"] == "quality"
+    assert second["_debug"]["issue_type"] == "temperature"
 
 
 def test_non_serious_refund_escalates_after_coupon_instead_of_auto_refund():

@@ -175,7 +175,8 @@ class Rules:
             issue_type = state.get("issue_type", issue_type)
         if photo_url and state.get("issue_type"):
             issue_type = state.get("issue_type", issue_type)
-        if issue_type == "foreign_object" and Rules._looks_like_ingredient_mismatch(user_text):
+        prep_anomaly = Rules._looks_like_prep_anomaly(user_text)
+        if issue_type == "foreign_object" and prep_anomaly:
             issue_type = "quality"
         info_query = Rules._choose_info_query(
             assessed_info_query=assessed_info_query,
@@ -194,9 +195,19 @@ class Rules:
             wants=wants,
             info_query=info_query,
         ) or ("none" if assessment_provided else Rules._detect_turn_act(complaint, wants, info_query))
+        if Rules._should_inherit_case_issue_type(
+            text=user_text,
+            state=state,
+            wants=wants,
+            info_query=info_query,
+            turn_act=turn_act,
+        ):
+            issue_type = state.get("case_issue_type", issue_type)
         is_abusive = Rules._is_abusive(complaint)
         inferred_fault = Rules._infer_fault(kitchen, fleet, issue_type)
         fault = Rules._choose_fault(inferred_fault, assessed_fault_hint, assessed_issue_confidence)
+        if prep_anomaly:
+            fault = "kitchen"
         issue_severity = Rules._choose_issue_severity(issue_type, assessed_issue_severity, assessed_issue_confidence, kitchen, fleet)
         explicit_comp = wants in {"refund", "replacement", "coupon", "credit"}
         current_turn_has_photo = bool(photo_url)
@@ -211,6 +222,8 @@ class Rules:
             assessed_visual_evidence=assessed_visual_evidence,
             assessed_issue_confidence=assessed_issue_confidence,
         )
+        if prep_anomaly:
+            needs_visual = False
         evidence_strength = Rules._evidence_strength(
             issue_type=issue_type,
             fault=fault,
@@ -1751,6 +1764,95 @@ class Rules:
         if "shouldn't be in" in text and any(term in text for term in benign_food_terms):
             return True
         return False
+
+    @staticmethod
+    def _looks_like_prep_anomaly(text: str) -> bool:
+        return Rules._looks_like_ingredient_mismatch(text)
+
+    @staticmethod
+    def _is_emotional_followup(text: str) -> bool:
+        if not text:
+            return False
+        emotional_phrases = [
+            "this is outrageous",
+            "outrageous",
+            "ridiculous",
+            "unacceptable",
+            "this is bad",
+            "this is terrible",
+            "how am i supposed",
+            "seriously",
+            "excuse me",
+            "what the hell",
+            "wtf",
+            "not acceptable",
+            "this is not okay",
+            "not okay",
+        ]
+        if any(phrase in text for phrase in emotional_phrases):
+            return True
+        tokens = re.findall(r"[a-z0-9]+", text)
+        return len(tokens) <= 4 and any(word in text for word in ["wow", "seriously", "really"])
+
+    @staticmethod
+    def _has_concrete_issue_signal(text: str) -> bool:
+        if not text:
+            return False
+        concrete_keywords = [
+            "cold",
+            "hot",
+            "late",
+            "delay",
+            "delayed",
+            "missing",
+            "wrong",
+            "spilled",
+            "spill",
+            "leak",
+            "leaked",
+            "damaged",
+            "broken",
+            "plastic",
+            "glass",
+            "hair",
+            "stone",
+            "bug",
+            "insect",
+            "portion",
+            "quantity",
+            "small",
+            "taste",
+            "burnt",
+            "raw",
+            "soggy",
+            "stale",
+            "uncooked",
+            "undercooked",
+            "overcooked",
+            "photo",
+            "video",
+            "attached",
+            "proof",
+        ]
+        return any(keyword in text for keyword in concrete_keywords)
+
+    @staticmethod
+    def _should_inherit_case_issue_type(
+        text: str,
+        state: Dict[str, Any],
+        wants: str,
+        info_query: str,
+        turn_act: str,
+    ) -> bool:
+        if not state.get("case_issue_type"):
+            return False
+        if wants != "none" or info_query != "none":
+            return False
+        if turn_act not in {"none", "clarify"}:
+            return False
+        if Rules._has_concrete_issue_signal(text):
+            return False
+        return Rules._is_emotional_followup(text)
 
     @staticmethod
     def _detect_info_query(complaint: str) -> str:

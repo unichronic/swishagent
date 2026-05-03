@@ -305,8 +305,15 @@ def _humanizer_added_new_claims(candidate: str, original: str) -> bool:
         "you don't need to take any action",
         "approved action",
         "approved amount",
+        "wallet",
     ]
-    return any(pattern in candidate_lower and pattern not in original_lower for pattern in forbidden_patterns)
+    if any(pattern in candidate_lower and pattern not in original_lower for pattern in forbidden_patterns):
+        return True
+    if ("₹" in candidate or "%" in candidate_lower or "coupon" in candidate_lower or "credit" in candidate_lower) and not (
+        "₹" in original or "%" in original_lower or "coupon" in original_lower or "credit" in original_lower
+    ):
+        return True
+    return False
 
 
 @app.post("/run")
@@ -392,7 +399,8 @@ def run(req: RunRequest, request: Request):
             issue_type=assessment.get("issue_type") if assessment else None,
             requested_resolution=assessment.get("requested_resolution") if assessment else None,
         )
-        if assessment_meta.get("status") != "ok":
+        assessment_fallback_used = assessment_meta.get("status") != "ok"
+        if assessment_fallback_used:
             logger.warning(
                 "assessment_failed order_id=%s user_id=%s status=%s raw_preview=%s error=%s",
                 req.order_id,
@@ -401,33 +409,14 @@ def run(req: RunRequest, request: Request):
                 assessment_meta.get("raw_preview"),
                 assessment_meta.get("error"),
             )
-            response = {
-                "action": "escalate",
-                "amount": 0.0,
-                "message": "I don't want to guess and get this wrong from chat alone. If you'd like to take it further, please email hello@justswish.in and the team can review it from there.",
-                "reason": f"assessment_unavailable:{assessment_meta.get('status')}",
-            }
-            if INCLUDE_ASSESSMENT_DEBUG:
-                response["_assessment"] = {"meta": assessment_meta, "parsed": assessment}
-            history.append({"role": "bot", "content": response["message"]})
             trace_event(
                 logger,
-                "decision_completed",
+                "assessment_fallback",
                 request_id=request_id,
-                status="assessment_unavailable",
-                action=response["action"],
+                status=assessment_meta.get("status"),
                 duration_ms=round((time.perf_counter() - started) * 1000, 2),
-                reason=response["reason"],
             )
-            if run_observation is not None:
-                run_observation.update(
-                    output=response,
-                    metadata={
-                        "status": "assessment_unavailable",
-                        "duration_ms": round((time.perf_counter() - started) * 1000, 2),
-                    },
-                )
-            return response
+            assessment = {}
         logger.info(
             "assessment_raw order_id=%s user_id=%s raw_preview=%s parsed=%s",
             req.order_id,
@@ -444,6 +433,7 @@ def run(req: RunRequest, request: Request):
                 "photo_valid": photo_valid,
                 "photo_in_session": session_has_photo(session_id),
                 "assessment": assessment,
+                "assessment_status": assessment_meta.get("status"),
             },
             metadata={"request_id": request_id},
         ) as rules_observation:
@@ -520,7 +510,11 @@ def run(req: RunRequest, request: Request):
                     "reason": resolution.get("reason"),
                     "message": resolution.get("message"),
                 },
-                metadata={"status": "ok", "duration_ms": round((time.perf_counter() - started) * 1000, 2)},
+                metadata={
+                    "status": "ok",
+                    "assessment_status": assessment_meta.get("status"),
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 2),
+                },
             )
         return resolution
     except Exception as exc:
