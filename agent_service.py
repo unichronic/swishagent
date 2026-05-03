@@ -45,6 +45,7 @@ class Resolution(BaseModel):
 class RunRequest(BaseModel):
     user_id: str
     order_id: str
+    conversation_id: Optional[str] = None
     complaint: str
     photo_url: Optional[str] = None
     order_value: float = 0.0
@@ -296,13 +297,17 @@ def run(req: RunRequest, request: Request):
     span_stack = ExitStack()
     run_observation = None
     try:
-        session_id = f"support:{req.user_id}:{req.order_id}"
+        session_id = req.conversation_id or f"support:{req.user_id}:{req.order_id}"
         span_stack.enter_context(
             langfuse_attributes(
                 user_id=req.user_id,
                 session_id=session_id,
                 trace_name="swish.support.run",
-                metadata={"request_id": request_id, "order_id": req.order_id},
+                metadata={
+                    "request_id": request_id,
+                    "order_id": req.order_id,
+                    "conversation_id": req.conversation_id,
+                },
                 tags=["support-agent", "swish"],
             )
         )
@@ -327,6 +332,7 @@ def run(req: RunRequest, request: Request):
             request_id=request_id,
             user_id=req.user_id,
             order_id=req.order_id,
+            conversation_id=req.conversation_id,
             has_photo=bool(req.photo_url),
             history_len=len(history),
         )
@@ -532,8 +538,8 @@ def run(req: RunRequest, request: Request):
 
 
 @app.post("/clear_session")
-def clear_session_endpoint(user_id: str, order_id: str):
-    session_id = f"support:{user_id}:{order_id}"
+def clear_session_endpoint(user_id: str, order_id: str, conversation_id: Optional[str] = None):
+    session_id = conversation_id or f"support:{user_id}:{order_id}"
     clear_session(session_id)
     return {"status": "cleared", "session_id": session_id}
 

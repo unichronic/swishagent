@@ -26,11 +26,12 @@ var rdb *redis.Client
 var ctx = context.Background()
 
 type ResolveRequest struct {
-	UserID     string  `json:"user_id" binding:"required"`
-	OrderID    string  `json:"order_id" binding:"required"`
-	Complaint  string  `json:"complaint" binding:"required"`
-	PhotoURL   string  `json:"photo_url"`
-	OrderValue float64 `json:"order_value"`
+	UserID         string  `json:"user_id" binding:"required"`
+	OrderID        string  `json:"order_id" binding:"required"`
+	ConversationID string  `json:"conversation_id"`
+	Complaint      string  `json:"complaint" binding:"required"`
+	PhotoURL       string  `json:"photo_url"`
+	OrderValue     float64 `json:"order_value"`
 }
 
 type Resolution struct {
@@ -41,11 +42,12 @@ type Resolution struct {
 }
 
 type AgentRequest struct {
-	UserID     string  `json:"user_id"`
-	OrderID    string  `json:"order_id"`
-	Complaint  string  `json:"complaint"`
-	PhotoURL   string  `json:"photo_url"`
-	OrderValue float64 `json:"order_value"`
+	UserID         string  `json:"user_id"`
+	OrderID        string  `json:"order_id"`
+	ConversationID string  `json:"conversation_id"`
+	Complaint      string  `json:"complaint"`
+	PhotoURL       string  `json:"photo_url"`
+	OrderValue     float64 `json:"order_value"`
 }
 
 func newRequestID() string {
@@ -320,11 +322,12 @@ func resolveHandler(c *gin.Context) {
 	saveComplaint(req.UserID, req.OrderID, req.Complaint)
 
 	agentReq := AgentRequest{
-		UserID:     req.UserID,
-		OrderID:    req.OrderID,
-		Complaint:  req.Complaint,
-		PhotoURL:   req.PhotoURL,
-		OrderValue: req.OrderValue,
+		UserID:         req.UserID,
+		OrderID:        req.OrderID,
+		ConversationID: req.ConversationID,
+		Complaint:      req.Complaint,
+		PhotoURL:       req.PhotoURL,
+		OrderValue:     req.OrderValue,
 	}
 
 	result := callAgent(agentReq, requestID)
@@ -376,6 +379,16 @@ func main() {
 	initRedis()
 
 	r := gin.Default()
+	r.Use(func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, X-Request-ID")
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+		c.Next()
+	})
 	r.POST("/resolve", resolveHandler)
 	r.POST("/verify-capture", verifyCaptureHandler)
 	r.POST("/clear_session", clearSessionHandler)

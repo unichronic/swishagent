@@ -124,6 +124,7 @@ function App() {
   const [recordingProgress, setRecordingProgress] = useState(0)
   const [previewStream, setPreviewStream] = useState(null)
   const previewVideoRef = useRef(null)
+  const conversationIdRef = useRef('')
   const lastComplaintRef = useRef('')
   const messagesEndRef = useRef(null)
   const fileInputRef = useRef(null)
@@ -143,6 +144,8 @@ function App() {
   }, [messages])
 
   const handleGetHelp = (order) => {
+    const conversationId = `support-${order.id}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+    conversationIdRef.current = conversationId
     setSelectedOrder(order)
     setView('chat')
     setAwaitingPhoto(false)
@@ -152,7 +155,7 @@ function App() {
     setPhotoFile(null)
     lastComplaintRef.current = ''
     // Clear backend session so history doesn't carry over
-    axios.post(`${API_BASE}/clear_session?user_id=USER123&order_id=${order.id}`).catch(() => {})
+    axios.post(`${API_BASE}/clear_session?user_id=USER123&order_id=${order.id}&conversation_id=${conversationId}`).catch(() => {})
     setMessages([{
       type: 'bot',
       text: `Hi! I'm here to help with order #${order.id}. What seems to be the issue?`,
@@ -308,6 +311,7 @@ function App() {
       const response = await axios.post(`${API_BASE}/resolve`, {
         user_id: 'USER123',
         order_id: order.id,
+        conversation_id: conversationIdRef.current,
         complaint,
         photo_url: photoUrl,
         order_value: order.amount
@@ -354,6 +358,7 @@ function App() {
       const response = await axios.post(`${API_BASE}/resolve`, {
         user_id: 'USER123',
         order_id: selectedOrder.id,
+        conversation_id: conversationIdRef.current,
         complaint: complaintText,
         photo_url: photoUrl,
         order_value: selectedOrder.amount
@@ -539,7 +544,7 @@ function App() {
             rows="1"
           />
           <button 
-            onClick={handleSend} 
+            onClick={() => handleSend()} 
             disabled={loading || awaitingPhoto || recording || (!input.trim() && !photoFile)}
             className="send-btn"
           >
