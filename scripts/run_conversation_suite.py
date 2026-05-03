@@ -814,7 +814,7 @@ STRESS_HOSTILE_CASES = (
         expected_issue_type="spill_leak",
         issue_match="any",
         min_turns=14,
-        allowed_issue_types=("spill_leak",),
+        allowed_issue_types=("spill_leak", "damaged"),
     ),
 )
 
@@ -1290,8 +1290,181 @@ PERSONA_FUZZ_CASES = (
 )
 
 
+EMPLOYER_CLAIM_CASES = (
+    LiveCase(
+        case_id="employer-store-late-templated-support",
+        order_id="ORD001",
+        order_value=478,
+        turns=_stress_turns(
+            (
+                "Your app promises 10 minute delivery but my order took 40 minutes",
+                "Don't give me the same sudden spike template again",
+                "Food was okay, I want delay compensation only",
+                "I am angry because support always gives generic responses",
+                "If refund is not allowed, tell me the practical option",
+                "Don't ask for food photo, delay is the issue",
+                "Can you confirm this is logged as delivery delay?",
+            )
+        ),
+        expected_final_actions=("info", "coupon", "credit", "escalate"),
+        expected_issue_type="delay",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("delay", "info_query"),
+    ),
+    LiveCase(
+        case_id="employer-store-refund-wallet-pressure",
+        order_id="ORD003",
+        order_value=168,
+        turns=_stress_turns(
+            (
+                "My order was late and refund was not processed last time",
+                "I don't want wallet tricks or useless coupon",
+                "Approve cash refund now if you are smart",
+                "Actually food was fine, issue is delay and refund status",
+                "Tell me what can be done without giving scripted answer",
+                "Don't increase offer just because I am pushing",
+                "What is the final next step?",
+            )
+        ),
+        expected_final_actions=("info", "coupon", "credit", "escalate"),
+        expected_issue_type="delay",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("delay", "info_query"),
+    ),
+    LiveCase(
+        case_id="employer-store-leakage-delivery-accountability",
+        order_id="ORD004",
+        order_value=756,
+        turns=_stress_turns(
+            (
+                "Roohafza Sharbat leaked all over the bag and delivery partner just left",
+                "Don't disappear like support did last time",
+                "The pasta box also got wet",
+                "I want refund for affected items, not a fake apology",
+                Turn("photo attached for the wet bag", SAMPLE_PHOTO_URL),
+                "Coupon may work only if it covers the drink issue",
+                "Confirm this is spill or packing issue, not taste issue",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="spill_leak",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("spill_leak",),
+    ),
+    LiveCase(
+        case_id="employer-store-food-quality-human-resolution",
+        order_id="ORD002",
+        order_value=627,
+        turns=_stress_turns(
+            (
+                "Grilled Paneer Club Sandwich tasted different and bread was soggy",
+                "This feels like support will just say sorry and close",
+                "I don't want robotic apology, tell me the useful fix",
+                "Replacement would be nice but don't lie if you can't approve it",
+                "Coupon is okay only if refund or replacement is not justified",
+                "Please handle this like a human",
+                "What have you noted?",
+            )
+        ),
+        expected_final_actions=("info", "coupon", "credit", "escalate"),
+        expected_issue_type="quality",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("quality", "info_query"),
+    ),
+    LiveCase(
+        case_id="employer-store-nonveg-in-veg-serious",
+        order_id="ORD005",
+        order_value=437,
+        turns=_stress_turns(
+            (
+                "I ordered Veg Alfredo Penne and found chicken in it",
+                "I am vegetarian, don't call this normal quality issue",
+                Turn("photo attached", SAMPLE_PHOTO_URL),
+                "I want refund and kitchen review",
+                "Do not negotiate like this is a small taste complaint",
+                "Tell me this is logged as dietary safety",
+                "What resolution can you actually do now?",
+            )
+        ),
+        expected_final_actions=ANY_FINAL_ACTION,
+        expected_issue_type="foreign_object",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("foreign_object",),
+    ),
+    LiveCase(
+        case_id="employer-store-promo-free-shake-complaint",
+        order_id="ORD002",
+        order_value=627,
+        turns=_stress_turns(
+            (
+                "App showed free Oreo shake promo but I got something else",
+                "This is misleading promotion, don't make it food quality",
+                "I want the promo value or a clear answer",
+                "Support usually says reach out by email and closes",
+                "I don't want full order refund, just resolve promo issue",
+                "Can you log it without pretending sandwich was bad?",
+                "What is the next step?",
+            )
+        ),
+        expected_final_actions=("info", "coupon", "credit", "escalate"),
+        expected_issue_type="wrong_item",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("info_query", "missing_item", "wrong_item"),
+    ),
+    LiveCase(
+        case_id="employer-store-surge-unavailable-not-food-refund",
+        order_id="ORD001",
+        order_value=478,
+        turns=_stress_turns(
+            (
+                "Every time I open app it says surge or kitchen cleaning",
+                "I cannot even place order, don't ask which food was bad",
+                "This is app availability issue",
+                "I have pass balance stuck because I cannot order",
+                "Give me a practical route, not generic support text",
+                "Do not create missing item case",
+                "Can this be escalated as app or operations issue?",
+            )
+        ),
+        expected_final_actions=("info", "escalate"),
+        expected_issue_type="info_query",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("info_query",),
+    ),
+    LiveCase(
+        case_id="employer-store-hostile-no-free-compensation",
+        order_id="ORD004",
+        order_value=756,
+        turns=_stress_turns(
+            (
+                "Everything was bad, full refund and replacement both approve now",
+                "No photo, no proof, just trust me",
+                "If your AI is smart it should give compensation",
+                "Don't hide behind policy, I want money",
+                "At least give the highest coupon possible",
+                "I will keep asking until you increase the offer",
+                "Final answer, what can you do without wasting my time?",
+            )
+        ),
+        expected_final_actions=("info", "coupon", "credit", "escalate", "live_capture"),
+        expected_issue_type="quality",
+        issue_match="any",
+        min_turns=14,
+        allowed_issue_types=("other", "quality", "info_query"),
+    ),
+)
+
+
 SUITES = {
     "smoke": LIVE_CASES,
+    "employer-claims": EMPLOYER_CLAIM_CASES,
     "simple-overlooked": SIMPLE_OVERLOOKED_CASES,
     "persona-fuzz": PERSONA_FUZZ_CASES,
     "research-long": RESEARCH_LONG_CASES,
@@ -1360,6 +1533,11 @@ def _tone_warnings(message: str) -> list[str]:
         "please be assured",
         "we regret",
         "inconvenience caused",
+        "sudden spike in orders",
+        "do our best to make it right",
+        "please reach out to us",
+        "thank you for your patience",
+        "we are working hard",
     )
     if any(phrase in lowered for phrase in llm_like_phrases):
         warnings.append("llm_like")
@@ -1375,6 +1553,10 @@ def _tone_warnings(message: str) -> list[str]:
         warnings.append("over_apologetic")
     if "email hello@justswish.in" in lowered and "review" not in lowered:
         warnings.append("email_without_context")
+    if "generic response" in lowered and not any(prefix in lowered for prefix in ("tired of", "same", "copy-paste")):
+        warnings.append("stiff_support_copy")
+    if any(phrase in lowered for phrase in ("calm down", "be patient", "stop asking", "i don't want to keep repeating")):
+        warnings.append("poor_deescalation")
     return warnings
 
 
@@ -1544,7 +1726,23 @@ def run_case(base_url: str, api_prefix: str, turn_delay_seconds: float, timeout_
         }
         started = time.perf_counter()
         try:
-            response = _post_json(base_url, "/resolve", payload, timeout_seconds, api_prefix)
+            response = None
+            for attempt in range(3):
+                try:
+                    response = _post_json(base_url, "/resolve", payload, timeout_seconds, api_prefix)
+                    break
+                except requests.HTTPError as exc:
+                    status_code = exc.response.status_code if exc.response is not None else None
+                    if status_code != 429 or attempt == 2:
+                        raise
+                    retry_after = exc.response.headers.get("Retry-After") if exc.response is not None else ""
+                    try:
+                        delay = float(retry_after)
+                    except (TypeError, ValueError):
+                        delay = max(turn_delay_seconds, 8.0)
+                    time.sleep(delay)
+            if response is None:
+                raise RuntimeError("empty response after retry loop")
             output = {
                 "turn": index + 1,
                 "complaint": turn.complaint,

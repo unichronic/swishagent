@@ -87,6 +87,8 @@ def _action_message_errors(action: str, amount: float, message: str) -> list[str
     operational_claims = (
         "i asked the kitchen",
         "i have asked the kitchen",
+        "i can check",
+        "check on",
         "kitchen will",
         "dispatch will",
         "rider will",

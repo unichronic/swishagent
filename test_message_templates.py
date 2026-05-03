@@ -70,3 +70,11 @@ def test_coupon_reinforcement_does_not_directly_approve_unverified_replacement()
 
     assert "don't have enough to approve a remake directly yet" in message
     assert "coupon right now" in message
+
+
+def test_review_repeat_message_is_not_antagonistic():
+    message = message_templates.review_repeat_message()
+
+    assert "already marked for review" in message
+    assert "keep repeating" not in message.lower()
+    assert "restating" not in message.lower()

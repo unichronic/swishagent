@@ -599,7 +599,7 @@ class Rules:
                 "amount": 0.0,
                 "message": Rules._review_escalation_message("case")
                 if escalation_repeat_count <= 1
-                else "This is already marked for review. I don't want to keep repeating the same step, and there isn't another auto action I can take in chat.",
+                else message_templates.review_repeat_message(),
                 "reason": "Case already marked for manual review",
             }
             Rules._store_terminal_state(state)
@@ -945,7 +945,7 @@ class Rules:
                 "amount": 0.0,
                 "message": Rules._review_escalation_message("case")
                 if escalation_repeat_count <= 1
-                else "This is already marked for review. I don't want to keep repeating the same step, and there isn't another auto action I can take in chat.",
+                else message_templates.review_repeat_message(),
                 "reason": "Case already marked for manual review",
             }
 
@@ -3439,14 +3439,14 @@ class Rules:
                 return f"{prefix}The {item_name} seems to have left the kitchen okay, so the damage may have happened in transit."
             if fault == "kitchen":
                 return f"{prefix}This looks more like a packing-side issue before the {item_name} went out."
-            return f"{prefix}I can see the damage on the {item_name}, but the logs don't show clearly whether it happened while packing or on the way."
+            return f"{prefix}You've reported damage on the {item_name}, but the logs don't show clearly whether it happened while packing or on the way."
         if issue_type == "temperature":
             delay = fleet.get("delay_mins")
             if fault == "delivery" and delay:
                 return f"{prefix}The {item_name} seems to have left in okay shape, but the {delay}-minute delivery delay could have affected the temperature."
             if fault == "kitchen":
                 return f"{prefix}The kitchen-side checks on the {item_name} weren't strong enough before dispatch, so that lines up more with prep than delivery."
-            return f"{prefix}I can see the temperature issue on the {item_name}, but the logs don't clearly show whether it shifted in prep or during delivery."
+            return f"{prefix}You've reported a temperature issue on the {item_name}, but the logs don't clearly show whether it shifted in prep or during delivery."
         if issue_type == "portion_size":
             component = (state or {}).get("portion_component")
             if component:
@@ -3700,6 +3700,7 @@ class Rules:
             r"\blet me\s+(check|see|arrange|get|send|call|contact|follow|reach|look|find)",
             r"\b(we'll|we will)\s+(check|see|arrange|get|send|call|contact|follow|reach|look|find)",
             r"\bi'm going to\s+(check|see|arrange|get|send|call|contact|follow|reach|look|find)",
+            r"\bi can\s+(check|see|arrange|call|contact|follow|look|find)",
             r"\b(hang tight|hold on|give me a (moment|second|minute)|bear with me)",
             r"\bsee (if|how) (we|i) can",
             r"\b(i'll|i will)\s+(keep an eye|track|watch)",
@@ -3748,14 +3749,14 @@ class Rules:
             return message
 
         suffixes = [
-            "Same update from my side.",
-            "Nothing has changed on this since my last message.",
-            "That is still the latest I can see.",
+            "I can keep the latest customer note attached to the case.",
+            "The review status has not changed yet.",
+            "That is still the latest case status I can see.",
             "I don't have a different update to add here.",
-            "The answer is still the same on my side.",
-            "I don't want to keep restating it differently.",
-            "There is no new action pending from me here.",
-            "That is still where this stands.",
+            "The available chat action is still the same.",
+            "I can still keep the context attached for the review team.",
+            "There is no extra automatic action available in chat.",
+            "That is still where the case stands.",
             "I have the same note on this order right now.",
             "No extra step has opened up from my side.",
             "I still don't have a different action to take here.",

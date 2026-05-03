@@ -185,7 +185,7 @@ def style_warnings(message: str) -> list[str]:
         "llm_like": ["as an ai", "i understand your concern", "i completely understand"],
         "policy_like": ["as per policy", "policy says", "eligible only"],
         "internal_leak": ["approved action", "approved amount", "margin", "company loss"],
-        "false_followup": ["i will check", "i'll check", "team will review", "i'll call"],
+        "false_followup": ["i will check", "i'll check", "i can check", "check on", "team will review", "i'll call"],
     }
     for label, phrases in patterns.items():
         if any(phrase in lowered for phrase in phrases):

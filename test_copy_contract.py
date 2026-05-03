@@ -41,6 +41,23 @@ def test_copy_contract_rejects_new_operational_claims():
     assert "new_forbidden_claim:i asked the kitchen" in errors
 
 
+def test_copy_contract_rejects_soft_check_promises():
+    contract = copy_contract.build_copy_contract(
+        {
+            "action": "info",
+            "amount": 0,
+            "message": "The delay is noted against delivery.",
+            "reason": "No explicit compensation request",
+        },
+        complaint="delivery was late",
+        order_items={"items": []},
+    )
+
+    errors = copy_contract.validate_candidate("I can check on the delivery delay for you.", contract)
+
+    assert "new_forbidden_claim:i can check" in errors
+
+
 def test_copy_contract_preserves_uncertainty():
     contract = copy_contract.build_copy_contract(
         {

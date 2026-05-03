@@ -172,6 +172,10 @@ def review_escalation_message(resolution_type: str) -> str:
     return "I can't close this properly from chat alone. If you'd like to take it further, please email hello@justswish.in and the team can review it from there."
 
 
+def review_repeat_message() -> str:
+    return "This is already marked for review. I can keep your latest note attached here, but I can't approve another automatic action in chat."
+
+
 def semantic_clarification_message(
     selected_item: str,
     mentioned_item: Optional[str],

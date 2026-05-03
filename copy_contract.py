@@ -55,6 +55,8 @@ FORBIDDEN_NEW_CLAIMS = {
     "free",
     "i asked the kitchen",
     "i have asked the kitchen",
+    "i can check",
+    "check on",
     "kitchen will",
     "dispatch will",
     "rider will",

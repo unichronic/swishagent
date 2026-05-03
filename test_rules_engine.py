@@ -3422,6 +3422,32 @@ def test_false_promise_filter_handles_curly_apostrophe():
     assert response["message"] == "I can add a coupon now."
 
 
+def test_false_promise_filter_handles_i_can_check():
+    response = Rules._enforce_content(
+        {
+            "action": "info",
+            "message": "I can check on the delivery delay for you. The delay is already noted.",
+        },
+        {},
+    )
+
+    assert "check on" not in response["message"].lower()
+    assert response["message"] == "The delay is already noted."
+
+
+def test_duplicate_review_copy_stays_customer_safe():
+    state = {"recent_bot_messages": []}
+    message = "This is already marked for review. I can keep your latest note attached here, but I can't approve another automatic action in chat."
+
+    first = Rules._enforce_content({"action": "escalate", "message": message}, state)
+    second = Rules._enforce_content({"action": "escalate", "message": message}, state)
+
+    combined = f"{first['message']} {second['message']}".lower()
+    assert "keep repeating" not in combined
+    assert "restating" not in combined
+    assert "already marked for review" in combined
+
+
 def test_pending_photo_flow_does_not_skip_to_coupon_without_evidence():
     session_id = "test:pending-photo-does-not-skip"
     clear_session(session_id)
