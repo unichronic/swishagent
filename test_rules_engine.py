@@ -3409,6 +3409,19 @@ def test_component_portion_complaint_does_not_reframe_whole_item_as_small():
     assert "bowl was small" not in first["message"].lower()
 
 
+def test_false_promise_filter_handles_curly_apostrophe():
+    response = Rules._enforce_content(
+        {
+            "action": "info",
+            "message": "I can add a coupon now. I’ll check if we can remake the sandwich instead.",
+        },
+        {},
+    )
+
+    assert "check if we can" not in response["message"].lower()
+    assert response["message"] == "I can add a coupon now."
+
+
 def test_pending_photo_flow_does_not_skip_to_coupon_without_evidence():
     session_id = "test:pending-photo-does-not-skip"
     clear_session(session_id)
