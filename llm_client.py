@@ -34,13 +34,6 @@ _primary_provider_idx = 0  # Will be set to first available provider
 # Track rate-limited providers with cooldown time
 _rate_limited_providers = {}  # {provider_name: cooldown_until_timestamp}
 
-# Mark rate-limited providers on startup
-import time
-_rate_limited_providers["groq_gpt"] = time.time() + 3600  # 1 hour cooldown (exhausted)
-_rate_limited_providers["groq_qwen"] = time.time() + 3600  # 1 hour cooldown (exhausted)
-_rate_limited_providers["nvidia"] = time.time() + 1800     # 30 min cooldown (hitting 429s)
-
-
 def call_text(messages: list, **kwargs) -> str:
     """Tier 1: try text providers in order, fall back to Gemini only if all fail."""
     global _primary_provider_idx, _rate_limited_providers

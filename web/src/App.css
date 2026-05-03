@@ -854,3 +854,49 @@ body {
   font-size: 14px;
   font-weight: 600;
 }
+
+.capture-review-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.capture-review-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.capture-review-error {
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.16);
+  color: white;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.35;
+  backdrop-filter: blur(12px);
+}
+
+.capture-review-btn {
+  border: none;
+  border-radius: 999px;
+  padding: 15px 18px;
+  background: linear-gradient(135deg, #2eae58 0%, #5ed485 100%);
+  color: white;
+  font-size: 15px;
+  font-weight: 800;
+  cursor: pointer;
+  box-shadow: 0 14px 30px rgba(46, 174, 88, 0.28);
+}
+
+.capture-review-btn.secondary {
+  background: rgba(255, 255, 255, 0.18);
+  color: white;
+  box-shadow: none;
+}
+
+.capture-review-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

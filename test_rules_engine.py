@@ -1850,7 +1850,8 @@ def test_portion_size_coupon_offer_uses_portion_specific_language():
     )
 
     assert second["action"] == "info"
-    assert "felt short for what you paid" in second["message"].lower()
+    assert "fries quantity" in second["message"].lower()
+    assert "coupon" in second["message"].lower()
 
 
 def test_foreign_object_coupon_offer_avoids_generic_quality_language():
@@ -2026,8 +2027,8 @@ def test_negotiation_disallowed_replacement_offer_goes_direct():
     )
 
     assert second["action"] == "info"
-    assert "fresh classic maggi" in second["message"].lower()
-    assert "coupon" not in second["message"].lower()
+    assert "coupon" in second["message"].lower() or "review" in second["message"].lower()
+    assert "fresh classic maggi" not in second["message"].lower()
 
 
 def test_delay_coupon_offer_stays_delay_specific():
@@ -2855,3 +2856,136 @@ def test_replacement_confirmation_pressure_escalates_instead_of_looping():
     assert first["action"] in {"info", "replacement", "escalate"}
     assert second["action"] == "escalate"
     assert "fresh Classic Maggi sent out" not in second["message"]
+
+
+def test_component_portion_complaint_does_not_reframe_whole_item_as_small():
+    session_id = "test:component-portion-language"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    order_items = {"items": [{"name": "Dhaba Style Chicken Curry Rice Bowl", "price": 269}]}
+    history.append({"role": "user", "content": "there was not enough chicken"})
+    first = Rules.resolve(
+        complaint="there was not enough chicken",
+        conversation_history=history,
+        order_value=756,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 15, "traffic_flag": True},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 756},
+        order_items=order_items,
+        session_id=session_id,
+        assessment={
+            "issue_type": "portion_size",
+            "issue_confidence": 0.92,
+            "active_item_name": "Dhaba Style Chicken Curry Rice Bowl",
+        },
+    )
+
+    assert first["_debug"]["issue_type"] == "portion_size"
+    assert "chicken quantity" in first["message"].lower()
+    assert "light for what you paid" not in first["message"].lower()
+    assert "bowl was small" not in first["message"].lower()
+
+
+def test_pending_photo_flow_does_not_skip_to_coupon_without_evidence():
+    session_id = "test:pending-photo-does-not-skip"
+    clear_session(session_id)
+
+    first = _run_turn(session_id, "Roohafza Sharbat spilled, I want compensation", order_value=756)
+    second = _run_turn(session_id, "I want compensation", order_value=756)
+
+    assert first["action"] == "live_capture"
+    assert second["action"] == "live_capture"
+    assert "photo" in second["message"].lower()
+
+
+def test_wrong_category_prefix_does_not_turn_benign_vegetable_into_wrong_item():
+    session_id = "test:wrong-prefix-ingredient-mismatch"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    complaint = "Wrong or different item Affected item is Butter Chicken Rice Bowl. There was a piece of vegetable in my chicken bowl"
+    history.append({"role": "user", "content": complaint})
+    result = Rules.resolve(
+        complaint=complaint,
+        conversation_history=history,
+        order_value=478,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 20, "temperature_check": "hot"},
+        fleet={"delay_mins": 5, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 478},
+        order_items={"items": [{"name": "Butter Chicken Rice Bowl", "price": 269}]},
+        session_id=session_id,
+    )
+
+    assert result["_debug"]["issue_type"] == "quality"
+    assert "wrong item was packed" not in result["message"].lower()
+
+
+def test_quality_replacement_request_gets_coupon_or_review_before_remake():
+    session_id = "test:quality-replacement-not-instant"
+    clear_session(session_id)
+
+    first = _run_turn(session_id, "Classic Maggi came soggy", order_value=168)
+    second = _run_turn(session_id, "Can I get a replacement", order_value=168)
+
+    assert first["_debug"]["issue_type"] == "quality"
+    assert second["action"] == "info"
+    assert "coupon" in second["message"].lower() or "review" in second["message"].lower()
+    assert "fresh classic maggi" not in second["message"].lower()
+
+
+def test_component_portion_followup_stays_portion_size():
+    session_id = "test:component-portion-followup"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    order_items = {"items": [{"name": "Chicken Rice Bowl", "price": 260}]}
+    for complaint in [
+        "there was not enough chicken in the bowl",
+        "I paid for chicken bowl, chicken quantity was too low",
+    ]:
+        history.append({"role": "user", "content": complaint})
+        result = Rules.resolve(
+            complaint=complaint,
+            conversation_history=history,
+            order_value=260,
+            trust_score=92,
+            kitchen={"quality_out": "good", "prep_time_mins": 10, "temperature_check": "hot"},
+            fleet={"delay_mins": 3, "traffic_flag": False},
+            trust={"score": 92, "total_orders": 18},
+            order_details={"total_amount": 260},
+            order_items=order_items,
+            session_id=session_id,
+        )
+        history.append({"role": "bot", "content": result["message"]})
+
+    assert result["_debug"]["issue_type"] == "portion_size"
+    assert "quality issue" not in result["message"].lower()
+
+
+def test_actual_item_correction_overrides_picker_item():
+    session_id = "test:actual-item-correction"
+    clear_session(session_id)
+
+    history = get_session(session_id)
+    complaint = "Issue picker says Oreo shake but actually my Roohafza spilled"
+    history.append({"role": "user", "content": complaint})
+    result = Rules.resolve(
+        complaint=complaint,
+        conversation_history=history,
+        order_value=240,
+        trust_score=92,
+        kitchen={"quality_out": "good", "prep_time_mins": 8, "temperature_check": "cold"},
+        fleet={"delay_mins": 3, "traffic_flag": False},
+        trust={"score": 92, "total_orders": 18},
+        order_details={"total_amount": 240},
+        order_items={"items": [{"name": "Oreo Shake", "price": 120}, {"name": "Roohafza", "price": 120}]},
+        session_id=session_id,
+    )
+
+    assert result["_debug"]["active_item_name"] == "Roohafza"
+    assert "roohafza" in result["message"].lower()

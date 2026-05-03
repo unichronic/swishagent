@@ -149,7 +149,12 @@ function App() {
   const [recording, setRecording] = useState(false)
   const [recordingProgress, setRecordingProgress] = useState(0)
   const [previewStream, setPreviewStream] = useState(null)
+  const [recordedCapture, setRecordedCapture] = useState(null)
+  const [verifyingCapture, setVerifyingCapture] = useState(false)
+  const [captureError, setCaptureError] = useState('')
   const previewVideoRef = useRef(null)
+  const recorderRef = useRef(null)
+  const recordingIntervalRef = useRef(null)
   const conversationIdRef = useRef('')
   const intakeContextPendingRef = useRef(false)
   const lastComplaintRef = useRef('')
@@ -171,10 +176,14 @@ function App() {
   }, [messages])
 
   const resetSupportState = () => {
+    if (recordedCapture?.videoUrl) URL.revokeObjectURL(recordedCapture.videoUrl)
     setAwaitingPhoto(false)
     setShowCaptureOverlay(false)
     setRecording(false)
     setRecordingProgress(0)
+    setRecordedCapture(null)
+    setVerifyingCapture(false)
+    setCaptureError('')
     setPreviewStream(null)
     setPhotoFile(null)
     setInput('')
@@ -314,48 +323,36 @@ function App() {
     const currentComplaint = lastComplaintRef.current
 
     try {
+      if (recordedCapture?.videoUrl) URL.revokeObjectURL(recordedCapture.videoUrl)
+      setRecordedCapture(null)
+      setVerifyingCapture(false)
+      setCaptureError('')
+      setRecordingProgress(0)
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
       setPreviewStream(stream)
       setShowCaptureOverlay(true)
       const recorder = new MediaRecorder(stream)
+      recorderRef.current = recorder
       const chunks = []
 
       recorder.ondataavailable = e => chunks.push(e.data)
       recorder.onstop = async () => {
         stream.getTracks().forEach(t => t.stop())
         setPreviewStream(null)
-        setShowCaptureOverlay(false)
         setRecording(false)
         setRecordingProgress(0)
+        recorderRef.current = null
 
         const mimeType = recorder.mimeType || 'video/webm'
         const videoBlob = new Blob(chunks, { type: mimeType })
+        const videoUrl = URL.createObjectURL(videoBlob)
         try {
           const frames = await extractFrames(videoBlob)
-
-          const formData = new FormData()
-          frames.forEach((blob, i) => formData.append('frames', blob, `frame${i}.png`))
-          formData.append('user_id', 'USER123')
-          formData.append('order_id', currentOrder.id)
-          formData.append('complaint', currentComplaint)
-
-          const result = await axios.post(`${API_BASE}/verify-capture`, formData)
-
-          if (result.data.valid) {
-            setAwaitingPhoto(false)
-            const captureFile = new File([frames[0]], 'capture.png', { type: 'image/png' })
-            // Call handleSend with explicit order/complaint to avoid stale closure
-            handleSendWithContext(captureFile, currentOrder, currentComplaint)
-          } else {
-            setAwaitingPhoto(false)
-            setMessages(prev => [...prev, {
-              type: 'bot',
-              text: "Sorry, we couldn't process your request.",
-              timestamp: new Date()
-            }])
-          }
+          setRecordedCapture({ videoUrl, frames, order: currentOrder, complaint: currentComplaint })
         } catch {
+          URL.revokeObjectURL(videoUrl)
           setAwaitingPhoto(false)
+          setShowCaptureOverlay(false)
           setMessages(prev => [...prev, {
             type: 'bot',
             text: 'Something went wrong with the capture. Please try again.',
@@ -374,9 +371,11 @@ function App() {
         setRecordingProgress(Math.min(elapsed / 5000, 1))
         if (elapsed >= 5000) {
           clearInterval(interval)
+          recordingIntervalRef.current = null
           recorder.stop()
         }
       }, 100)
+      recordingIntervalRef.current = interval
 
     } catch {
       setMessages(prev => [...prev, {
@@ -388,13 +387,56 @@ function App() {
   }
 
   const handleCancelRecording = () => {
+    if (recordingIntervalRef.current) {
+      clearInterval(recordingIntervalRef.current)
+      recordingIntervalRef.current = null
+    }
+    if (recorderRef.current && recorderRef.current.state === 'recording') {
+      recorderRef.current.onstop = null
+      recorderRef.current.stop()
+      recorderRef.current = null
+    }
     if (previewStream) {
       previewStream.getTracks().forEach((track) => track.stop())
     }
+    if (recordedCapture?.videoUrl) URL.revokeObjectURL(recordedCapture.videoUrl)
     setPreviewStream(null)
     setShowCaptureOverlay(false)
     setRecording(false)
     setRecordingProgress(0)
+    setRecordedCapture(null)
+    setVerifyingCapture(false)
+    setCaptureError('')
+  }
+
+  const handleUseRecordedCapture = async () => {
+    if (!recordedCapture || verifyingCapture) return
+    setVerifyingCapture(true)
+    setCaptureError('')
+    try {
+      const formData = new FormData()
+      recordedCapture.frames.forEach((blob, i) => formData.append('frames', blob, `frame${i}.png`))
+      formData.append('user_id', 'USER123')
+      formData.append('order_id', recordedCapture.order.id)
+      formData.append('complaint', recordedCapture.complaint)
+
+      const result = await axios.post(`${API_BASE}/verify-capture`, formData)
+
+      if (result.data.valid) {
+        const captureFile = new File([recordedCapture.frames[0]], 'capture.png', { type: 'image/png' })
+        URL.revokeObjectURL(recordedCapture.videoUrl)
+        setRecordedCapture(null)
+        setShowCaptureOverlay(false)
+        setAwaitingPhoto(false)
+        handleSendWithContext(captureFile, recordedCapture.order, recordedCapture.complaint, '🎥 Video attached')
+      } else {
+        setCaptureError("We couldn't verify that capture. Retake it with the order clearly in frame.")
+      }
+    } catch {
+      setCaptureError('Something went wrong while checking the capture. Please try again.')
+    } finally {
+      setVerifyingCapture(false)
+    }
   }
 
   const uploadPhoto = async (file) => {
@@ -402,10 +444,10 @@ function App() {
   }
 
   // Used by live capture — takes explicit order/complaint to avoid stale closure
-  const handleSendWithContext = async (photo, order, complaint) => {
+  const handleSendWithContext = async (photo, order, complaint, displayText = '📷 Photo attached') => {
     setMessages(prev => [...prev, {
       type: 'user',
-      text: '📷 Photo attached',
+      text: displayText,
       photo: URL.createObjectURL(photo),
       timestamp: new Date()
     }])
@@ -740,23 +782,47 @@ function App() {
 
       {showCaptureOverlay && (
         <div className="capture-overlay">
-          <video ref={previewVideoRef} autoPlay muted playsInline className="capture-overlay-video" />
+          {recordedCapture ? (
+            <video src={recordedCapture.videoUrl} controls playsInline className="capture-overlay-video" />
+          ) : (
+            <video ref={previewVideoRef} autoPlay muted playsInline className="capture-overlay-video" />
+          )}
           <div className="capture-overlay-top">
             <button className="capture-close" onClick={handleCancelRecording}>×</button>
             <div className="capture-status">
-              <span className="capture-status-dot" />
-              <span>{recording ? 'Recording live capture' : 'Preparing camera'}</span>
+              {!recordedCapture && <span className="capture-status-dot" />}
+              <span>
+                {recordedCapture
+                  ? 'Review capture'
+                  : recording
+                    ? 'Recording live capture'
+                    : 'Preparing camera'}
+              </span>
             </div>
           </div>
           <div className="capture-overlay-bottom">
-            <div className="capture-progress-shell">
-              <div className="capture-progress-track">
-                <div className="capture-progress-fill" style={{ width: `${recordingProgress * 100}%` }} />
+            {recordedCapture ? (
+              <div className="capture-review-panel">
+                {captureError && <div className="capture-review-error">{captureError}</div>}
+                <div className="capture-review-actions">
+                  <button className="capture-review-btn secondary" onClick={handleStartRecording} disabled={verifyingCapture}>
+                    Retake
+                  </button>
+                  <button className="capture-review-btn" onClick={handleUseRecordedCapture} disabled={verifyingCapture}>
+                    {verifyingCapture ? 'Checking…' : 'Use video'}
+                  </button>
+                </div>
               </div>
-              <div className="capture-progress-text">
-                {recording ? 'Keep the order in frame for 5 seconds' : 'Starting camera...'}
+            ) : (
+              <div className="capture-progress-shell">
+                <div className="capture-progress-track">
+                  <div className="capture-progress-fill" style={{ width: `${recordingProgress * 100}%` }} />
+                </div>
+                <div className="capture-progress-text">
+                  {recording ? 'Keep the order in frame for 5 seconds' : 'Starting camera...'}
+                </div>
               </div>
-            </div>
+            )}
           </div>
         </div>
       )}

@@ -91,6 +91,9 @@ class Rules:
         bot_count = sum(1 for msg in history if msg.get("role") == "bot")
         last_bot_msg = next((msg.get("content", "") for msg in reversed(history) if msg.get("role") == "bot"), "")
         user_text = _lower(complaint)
+        portion_component = Rules._portion_component(user_text)
+        if portion_component:
+            state["portion_component"] = portion_component
         assessment = assessment or {}
         assessment_provided = bool(assessment)
         matched_item = {} if assessment_provided else Rules._match_item(order_items, complaint)
@@ -207,6 +210,7 @@ class Rules:
         if photo_url and state.get("issue_type"):
             issue_type = state.get("issue_type", issue_type)
         prep_anomaly = Rules._looks_like_prep_anomaly(user_text)
+        state["prep_anomaly"] = prep_anomaly
         if issue_type == "foreign_object" and prep_anomaly:
             issue_type = "quality"
         issue_type = Rules._strong_text_issue_override(user_text, issue_type)
@@ -469,6 +473,13 @@ class Rules:
                 }
                 Rules._store_terminal_state(state)
                 return Rules._enforce_content(response, state)
+            response = {
+                "action": "live_capture",
+                "amount": 0.0,
+                "message": Rules._photo_message(order_value, issue_type, item_name),
+                "reason": "Waiting for photo evidence before compensation decision",
+            }
+            return Rules._enforce_content(response, state)
 
         photo_required = Rules._needs_photo(
             explicit_comp=explicit_comp,
@@ -481,7 +492,7 @@ class Rules:
             response = {
                 "action": "live_capture",
                 "amount": 0.0,
-                "message": Rules._photo_message(order_value, issue_type),
+                "message": Rules._photo_message(order_value, issue_type, item_name),
                 "reason": "Photo required before compensation decision",
             }
             return Rules._enforce_content(response, state)
@@ -688,7 +699,7 @@ class Rules:
             return {
                 "action": "info",
                 "amount": 0.0,
-                "message": Rules._info_message(item_name, issue_type, fault, kitchen, fleet, trust, last_bot_msg),
+                "message": Rules._info_message(item_name, issue_type, fault, kitchen, fleet, trust, last_bot_msg, state),
                 "reason": "User asked for the cause of an identified issue",
             }
 
@@ -729,8 +740,36 @@ class Rules:
             return {
                 "action": "info",
                 "amount": 0.0,
-                "message": Rules._info_message(item_name, issue_type, fault, kitchen, fleet, trust, last_bot_msg),
+                "message": Rules._info_message(item_name, issue_type, fault, kitchen, fleet, trust, last_bot_msg, state),
                 "reason": "First complaint gets explanation only",
+            }
+
+        if wants in {"coupon", "credit"}:
+            state["pending"] = "coupon"
+            state["desired_resolution"] = "coupon"
+            state["coupon_amount"] = coupon_amount
+            state["coupon_push_count"] = 0
+            return {
+                "action": "info",
+                "amount": 0.0,
+                "message": Rules._coupon_offer_message(
+                    coupon_amount=coupon_amount,
+                    issue_type=issue_type,
+                    issue_severity=state.get("issue_severity", "medium"),
+                    desired_resolution="coupon",
+                    evidence_strength=state.get("evidence_strength", "weak"),
+                    economic_preference=state.get("economic_preference"),
+                    tone_guardrail=state.get("tone_guardrail", "neutral"),
+                    negotiation_allowed=state.get("negotiation_allowed", False),
+                    negotiation_strength=state.get("negotiation_strength", "none"),
+                    order_value=order_value,
+                    item_price=state.get("active_item_price"),
+                    trust_score=trust_score,
+                    item_name=item_name,
+                    last_bot_msg=last_bot_msg,
+                    portion_component=state.get("portion_component"),
+                ),
+                "reason": "Offer coupon for compensation request",
             }
 
         if wants in {"refund", "replacement"}:
@@ -779,6 +818,7 @@ class Rules:
                     trust_score=trust_score,
                     item_name=item_name,
                     last_bot_msg=last_bot_msg,
+                    portion_component=state.get("portion_component"),
                 ),
                 "reason": "Offer coupon before refund or replacement",
             }
@@ -787,7 +827,7 @@ class Rules:
         return {
             "action": "info",
             "amount": 0.0,
-            "message": Rules._followup_info_message(item_name, issue_type, fault, kitchen, fleet, last_bot_msg),
+            "message": Rules._followup_info_message(item_name, issue_type, fault, kitchen, fleet, last_bot_msg, state),
             "reason": "No explicit compensation request",
         }
 
@@ -856,6 +896,32 @@ class Rules:
 
         replacement_requested = wants == "replacement" if assessment_provided else Rules._mentions_replacement(user_text)
         refund_requested = wants == "refund" if assessment_provided else Rules._mentions_refund(user_text)
+
+        if "whatever works" in user_text:
+            return {
+                "action": "info",
+                "amount": 0.0,
+                "message": "Just to be sure, do you want the coupon, a refund, or a replacement?",
+                "reason": "Need clarification on ambiguous coupon response",
+            }
+
+        if (
+            Rules._is_generic_info_followup(user_text)
+            and not replacement_requested
+            and not refund_requested
+            and turn_act != "confirm"
+        ):
+            return {
+                "action": "info",
+                "amount": 0.0,
+                "message": Rules._coupon_context_message(
+                    issue_type=issue_type,
+                    item_name=item_name,
+                    coupon_amount=float(state.get("coupon_amount", coupon_amount)),
+                    portion_component=state.get("portion_component"),
+                ),
+                "reason": "Answered case-scope follow-up without changing compensation state",
+            }
 
         if (
             Rules._is_case_scope_or_support_pressure_turn(user_text)
@@ -1082,7 +1148,7 @@ class Rules:
         return {
             "action": "refund",
             "amount": amount,
-            "message": f"You're right, that wasn't good enough. I've approved a ₹{amount:.0f} refund.",
+            "message": f"I've approved a ₹{amount:.0f} refund for this order.",
             "reason": "Refund approved after explicit amount selection",
         }
 
@@ -1114,6 +1180,15 @@ class Rules:
 
         refund_requested = wants == "refund" if assessment_provided else Rules._mentions_refund(user_text)
         replacement_reaffirmed = wants == "replacement" if assessment_provided else Rules._mentions_replacement(user_text)
+        if any(phrase in user_text for phrase in ["review it", "move it for review", "escalate it", "raise this"]):
+            state["pending"] = None
+            state["desired_resolution"] = None
+            return {
+                "action": "escalate",
+                "amount": 0.0,
+                "message": Rules._review_escalation_message("replacement"),
+                "reason": "User asked to move replacement case for review",
+            }
         if (turn_act == "switch_resolution" and refund_requested) or (refund_requested and not hard_block_refund):
             if preferred_resolution == "replacement":
                 return {
@@ -1274,6 +1349,8 @@ class Rules:
 
         if issue_type == "portion_size":
             return "refund"
+        if issue_type in {"quality", "temperature"} and issue_severity != "high":
+            return "escalate"
         if issue_type in {"wrong_item", "missing_item"} and evidence_strength == "strong":
             return "refund" if refund_cost <= replacement_cost else "replacement"
         if issue_type == "foreign_object" and issue_severity == "high":
@@ -1444,7 +1521,7 @@ class Rules:
         if issue_type == "delay":
             return "the delay was longer than it should've been"
         if issue_type == "portion_size":
-            return "that felt light for what you paid"
+            return "the quantity looked short for what you paid"
         if issue_type == "temperature":
             return "it should've reached you in better shape"
         if issue_type == "foreign_object":
@@ -1516,6 +1593,30 @@ class Rules:
             f"I can put through the ₹{amount} coupon now if that helps. "
             f"If not, tell me the fix you'd rather go with."
         )
+
+    @staticmethod
+    def _coupon_context_message(
+        issue_type: str,
+        item_name: str,
+        coupon_amount: float,
+        portion_component: Optional[str] = None,
+    ) -> str:
+        amount = int(coupon_amount)
+        if issue_type == "delay":
+            noted = "a delivery delay"
+        elif issue_type == "portion_size" and portion_component:
+            noted = f"low {portion_component} quantity on the {item_name}"
+        elif issue_type == "portion_size":
+            noted = f"a quantity issue on the {item_name}"
+        elif issue_type in {"spill_leak", "damaged"}:
+            noted = f"a spill or damage issue with the {item_name}"
+        elif issue_type == "missing_item":
+            noted = f"a missing item issue for the {item_name}"
+        elif issue_type == "wrong_item":
+            noted = f"a wrong item issue for the {item_name}"
+        else:
+            noted = f"a quality issue with the {item_name}"
+        return f"I've noted this as {noted}. The ₹{amount} coupon is the direct option I can put through here."
 
     @staticmethod
     def _review_escalation_message(resolution_type: str) -> str:
@@ -1599,6 +1700,28 @@ class Rules:
         if issue_type in {"temperature", "quality"}:
             return "medium"
         return "low"
+
+    @staticmethod
+    def _portion_component(text: str) -> Optional[str]:
+        if not text:
+            return None
+        component_terms = [
+            "chicken",
+            "paneer",
+            "fries",
+            "rice",
+            "noodles",
+            "sauce",
+            "cheese",
+            "maggi",
+            "samosa",
+        ]
+        if not any(term in text for term in ["less", "low", "kam", "enough", "quantity", "portion", "qnty", "qty"]):
+            return None
+        for term in component_terms:
+            if re.search(rf"\b{re.escape(term)}\b", text):
+                return term
+        return None
 
     @staticmethod
     def _clarification_message(state: Dict[str, Any], issue_type: str) -> str:
@@ -1871,7 +1994,11 @@ class Rules:
             return "spill_leak"
         if any(word in text for word in ["damaged", "crushed", "broken", "soggy packaging"]):
             return "damaged"
-        if re.search(r"\b(qty|qnty|quantity|portion)\s+(?:vry\s+|very\s+)?(less|low|kam)\b", text):
+        if re.search(r"\bnot\s+enough\s+(?:chicken|paneer|fries|rice|noodles|sauce|cheese|maggi|samosa)\b", text):
+            return "portion_size"
+        if re.search(r"\b(?:chicken|paneer|fries|rice|noodles|sauce|cheese|maggi|samosa)\s+(?:qty|qnty|quantity|portion)\s+(?:was\s+|is\s+)?(?:too\s+|very\s+)?(?:less|low|kam)\b", text):
+            return "portion_size"
+        if re.search(r"\b(qty|qnty|quantity|portion)\s+(?:too\s+|vry\s+|very\s+)?(less|low|kam)\b", text):
             return "portion_size"
         if re.search(r"\b(?:tiny|small)\s+(?:portion|serving|pieces?|pices)\b", text):
             return "portion_size"
@@ -1926,6 +2053,8 @@ class Rules:
             return "info_query"
         if Rules._is_non_delivery_signal(text):
             return "missing_item"
+        if Rules._looks_like_ingredient_mismatch(text):
+            return "quality"
         if Rules._is_wrong_order_signal(text):
             return "wrong_item"
         if Rules._is_spill_contamination_signal(text):
@@ -1940,8 +2069,6 @@ class Rules:
             return "temperature"
         if any(phrase in text for phrase in ["order hi nahi", "not my order", "different items", "kisi aur ka naam", "someone else"]):
             return "wrong_item"
-        if Rules._looks_like_ingredient_mismatch(text):
-            return "quality"
         if Rules._looks_like_dietary_violation(text):
             return "foreign_object"
         spill_context = any(
@@ -1972,9 +2099,13 @@ class Rules:
             return "spill_leak" if spill_context else "damaged"
         if "bag me spill" in text or "bag mein spill" in text or "andar spill" in text:
             return "spill_leak"
-        if re.search(r"\b(quantity|qty|qnty|portion)\s+(bahut\s+|vry\s+|very\s+)?(kam|less|low)\b", text):
+        if re.search(r"\b(quantity|qty|qnty|portion)\s+(bahut\s+|too\s+|vry\s+|very\s+)?(kam|less|low)\b", text):
             return "portion_size"
         if re.search(r"\b(kam|less)\s+(quantity|qty|qnty|portion)\b", text):
+            return "portion_size"
+        if re.search(r"\bnot\s+enough\s+(?:chicken|paneer|fries|rice|noodles|sauce|cheese|maggi|samosa)\b", text):
+            return "portion_size"
+        if re.search(r"\b(?:chicken|paneer|fries|rice|noodles|sauce|cheese|maggi|samosa)\s+(?:qty|qnty|quantity|portion)\s+(?:was\s+|is\s+)?(?:too\s+|very\s+)?(?:less|low|kam)\b", text):
             return "portion_size"
         if any(phrase in text for phrase in ["bahut kam thi", "bahut kam tha", "quantity kam thi", "quantity kam tha", "size very small", "size bahut small", "pieces small", "pices small", "qty issue", "qnty issue"]):
             return "portion_size"
@@ -1992,6 +2123,8 @@ class Rules:
         if Rules._mentions_refund(text):
             return "refund"
         if "coupon" in text:
+            return "coupon"
+        if "compensation" in text or "compensate" in text:
             return "coupon"
         if "credit" in text or "wallet" in text:
             return "credit"
@@ -2241,6 +2374,8 @@ class Rules:
             "be specific",
             "what have you noted",
             "what have you noted for this order",
+            "what you have noted",
+            "confirm what you have noted",
             "is there any resolution",
             "don't ask the same thing",
             "dont ask the same thing",
@@ -2776,17 +2911,31 @@ class Rules:
             return {}
 
         complaint_lower = _lower(complaint)
+        correction_segment = ""
+        for marker in ("but actually", "actually", "not the", "not ", "instead", "i meant", "meant"):
+            if marker in complaint_lower:
+                correction_segment = complaint_lower.split(marker, 1)[1]
+                break
         scored: List[tuple[int, Dict[str, Any]]] = []
         for item in items:
             name = _lower(item.get("name"))
             score = 0
             for token in re.findall(r"[a-z0-9]+", name):
-                if token and token in complaint_lower:
+                exact_match = bool(token and token in complaint_lower)
+                correction_match = bool(correction_segment and token and token in correction_segment)
+                if exact_match:
                     score += len(token)
-                else:
+                elif len(token) >= 4:
                     for word in re.findall(r"[a-z0-9]+", complaint_lower):
-                        if len(token) >= 4 and SequenceMatcher(None, token, word).ratio() >= 0.82:
+                        if SequenceMatcher(None, token, word).ratio() >= 0.82:
                             score += len(token)
+                            break
+                if correction_match:
+                    score += len(token) * 3
+                elif correction_segment and len(token) >= 4:
+                    for word in re.findall(r"[a-z0-9]+", correction_segment):
+                        if SequenceMatcher(None, token, word).ratio() >= 0.82:
+                            score += len(token) * 3
                             break
             scored.append((score, item))
 
@@ -2817,8 +2966,11 @@ class Rules:
         name = _lower(item.get("name"))
         if not name:
             return False
+        complaint_tokens = re.findall(r"[a-z0-9]+", complaint_lower)
         for token in re.findall(r"[a-z0-9]+", name):
             if len(token) >= 4 and token in complaint_lower:
+                return True
+            if len(token) >= 4 and any(SequenceMatcher(None, token, word).ratio() >= 0.82 for word in complaint_tokens):
                 return True
         return False
 
@@ -2937,10 +3089,11 @@ class Rules:
         return Rules._accepted(_lower(last_user)) or Rules._extract_refund_percentage(last_user) is not None
 
     @staticmethod
-    def _photo_message(order_value: float, issue_type: str) -> str:
+    def _photo_message(order_value: float, issue_type: str, item_name: str = "item") -> str:
         if issue_type == "missing_item":
             return "Can you send a quick photo of what arrived? That helps me verify the missing item fast."
-        return "Can you send a quick photo of the food? That helps me sort this faster."
+        target = item_name if item_name and item_name != "item" else "item"
+        return f"Can you send a quick photo of the {target}? That helps me sort this faster."
 
     @staticmethod
     def _info_message(
@@ -2951,6 +3104,7 @@ class Rules:
         fleet: Dict[str, Any],
         trust: Dict[str, Any],
         last_bot_msg: str,
+        state: Optional[Dict[str, Any]] = None,
     ) -> str:
         prefix = ""
         if issue_type in {"foreign_object", "wrong_item", "missing_item", "damaged", "spill_leak"}:
@@ -2983,7 +3137,7 @@ class Rules:
                 return f"{prefix}The {item_name} was marked okay at dispatch, so this may have spilled in transit, especially with the {delay}-minute delay."
             if fault == "kitchen":
                 return f"{prefix}This looks more like a sealing or packing miss before the {item_name} left the kitchen."
-            return f"{prefix}I can see the spill on the {item_name}, but the logs don't cleanly show whether it happened while packing or during delivery."
+            return f"{prefix}You've reported a spill on the {item_name}, but the logs don't cleanly show whether it happened while packing or during delivery."
         if issue_type == "damaged":
             if fault == "delivery":
                 return f"{prefix}The {item_name} seems to have left the kitchen okay, so the damage may have happened in transit."
@@ -2998,11 +3152,18 @@ class Rules:
                 return f"{prefix}The kitchen-side checks on the {item_name} weren't strong enough before dispatch, so that lines up more with prep than delivery."
             return f"{prefix}I can see the temperature issue on the {item_name}, but the logs don't clearly show whether it shifted in prep or during delivery."
         if issue_type == "portion_size":
-            return f"{prefix}I can't verify portion size reliably from the logs after delivery, but I'm logging this against the kitchen for the {item_name} because it sounds light for what you paid."
+            component = (state or {}).get("portion_component")
+            if component:
+                return f"{prefix}I can't verify the {component} quantity or portion size from logs after delivery, but I'm logging this against the kitchen for the {item_name}."
+            return f"{prefix}I can't verify portion size from logs after delivery, but I'm logging this against the kitchen for the {item_name}."
 
         if fault == "kitchen":
+            if (state or {}).get("prep_anomaly"):
+                return f"{prefix}This looks like an ingredient mix-up on the {item_name}, not a wrong-item or safety issue from what I can see."
             quality = kitchen.get("quality_out") or "fair"
-            return f"{prefix}The kitchen log on the {item_name} suggests it wasn't at its best when it went out. The recorded quality check was {quality}."
+            if quality == "fair":
+                return f"{prefix}The kitchen check for the {item_name} was only marked fair, so I'm noting this as a prep-side quality issue."
+            return f"{prefix}The kitchen check for the {item_name} was marked {quality}, but your quality complaint is still noted against prep."
         if fault == "delivery":
             delay = fleet.get("delay_mins") or "a few"
             return f"{prefix}The {item_name} looks okay from the kitchen side, but the delivery leg picked up about a {delay}-minute delay."
@@ -3016,6 +3177,7 @@ class Rules:
         kitchen: Dict[str, Any],
         fleet: Dict[str, Any],
         last_bot_msg: str,
+        state: Optional[Dict[str, Any]] = None,
     ) -> str:
         if issue_type == "delay":
             delay = fleet.get("delay_mins")
@@ -3034,7 +3196,7 @@ class Rules:
                 return f"The {item_name} seems to have gone wrong on the way, not at prep, especially with that {delay}-minute delay."
             if fault == "kitchen":
                 return f"This still looks more like the {item_name} wasn't sealed or packed properly before dispatch."
-            return f"I can see the spill issue, but the logs still don't prove whether it happened while packing or in transit."
+            return "I've noted the spill issue, but the logs still don't prove whether it happened while packing or in transit."
         if issue_type == "damaged":
             if fault == "delivery":
                 return f"The {item_name} seems to have taken the hit in transit rather than at prep."
@@ -3049,10 +3211,13 @@ class Rules:
                 return f"The kitchen checks on the {item_name} don't look strong enough before dispatch."
             return f"I can see the temperature issue, but the logs don't cleanly pin it on prep or delivery."
         if issue_type == "portion_size":
-            return f"I still can't verify portion size reliably after delivery, but I've noted it as kitchen feedback on the {item_name}."
+            component = (state or {}).get("portion_component")
+            if component:
+                return f"I still can't verify the {component} quantity or portion size after delivery, but I've noted it against the kitchen for the {item_name}."
+            return f"I still can't verify portion size after delivery, but I've noted it against the kitchen for the {item_name}."
 
         if fault == "kitchen":
-            return f"The kitchen log on the {item_name} suggests it wasn't at its best when it went out."
+            return f"I've noted this as a prep-side quality issue for the {item_name}."
         if fault == "delivery":
             return f"The {item_name} looks okay from the kitchen side, and the delivery leg is the part that looks weaker here."
         return "The logs still don't point to one clean cause."
@@ -3129,9 +3294,15 @@ class Rules:
         trust_score: float,
         item_name: str,
         last_bot_msg: str,
+        portion_component: Optional[str] = None,
     ) -> str:
         amount = int(coupon_amount)
         frame = Rules._issue_negotiation_frame(issue_type, desired_resolution, evidence_strength)
+        if desired_resolution == "replacement" and issue_type in {"quality", "temperature"} and issue_severity != "high":
+            return (
+                f"I can add a ₹{amount} coupon right away for this. "
+                f"If that still doesn't feel enough, I can move it for review instead of promising a remake too quickly."
+            )
         if desired_resolution == "replacement" and evidence_strength != "strong":
             return (
                 f"I want to keep this moving for you. Since I can't verify enough for a remake yet, I can add a ₹{amount} coupon right now. "
@@ -3166,7 +3337,9 @@ class Rules:
         if issue_type == "delay":
             return f"I can offer a ₹{amount} coupon for the delay right away if that works for you."
         if issue_type == "portion_size":
-            return f"I can add a ₹{amount} coupon right away for this since it felt short for what you paid. Want me to put that through?"
+            if portion_component:
+                return f"I can add a ₹{amount} coupon right away for the low {portion_component} quantity. Want me to put that through?"
+            return f"I can add a ₹{amount} coupon right away for the quantity issue. Want me to put that through?"
         if issue_type == "foreign_object":
             if tone_guardrail == "sensitive":
                 return f"I can put through a ₹{amount} coupon right away while I keep this moving for you. If that still doesn't feel right, we can take the next step."

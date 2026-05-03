@@ -36,6 +36,7 @@ services:
     env_file: .env
     environment:
       - DATA_API_URL=http://data:8081
+      - REDIS_ADDR=redis:6379
     deploy:
       resources:
         limits:
@@ -51,6 +52,7 @@ services:
     env_file: .env
     environment:
       - AGENT_SERVICE_URL=http://agent:8001
+      - REDIS_ADDR=redis:6379
     depends_on:
       - postgres
       - redis

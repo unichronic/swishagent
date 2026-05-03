@@ -233,6 +233,9 @@ def _humanize_message(
     original = resolution.get("message", "")
     if resolution.get("action") in {"replacement", "refund", "live_capture"}:
         return resolution
+    issue_type = (resolution.get("_debug") or {}).get("issue_type")
+    if issue_type == "portion_size":
+        return resolution
     allowed_reasons = {
         "No explicit compensation request",
         "Offer coupon before refund or replacement",
